@@ -298,123 +298,108 @@ def has_tty():
     return _TTY is not None or (sys.stdin.isatty() and sys.stdout.isatty())
 
 
-# ----- UI: top-level menu --------------------------------------------------
+# ----- UI: single-screen selector ------------------------------------------
 
-def render_main(idx, selected):
+# One flat row list: category headers, indented items, then action buttons.
+def _build_rows():
     rows = []
-    entries = main_entries(selected)
-    for i, (label, desc) in enumerate(entries):
-        on = i == idx
-        marker = "▸" if on else " "
-        if on:
-            line = Text(f" {marker} {label}", style="bold reverse cyan")
-            line.append(f"   {desc}", style="reverse")
-        else:
-            line = Text(f" {marker} ", style="cyan")
-            line.append(label, style="bold")
-            line.append(f"   {desc}", style="dim")
-        rows.append(line)
-    body = Group(
-        Align.center(Text(BANNER, style="bold cyan")),
-        Text(""),
-        *rows,
-    )
-    return Panel(
-        body,
-        title="[bold cyan]bootstrap[/]",
-        subtitle="[dim]checked = keep/install · unchecked = remove · ↑/↓ move · enter · q quit[/]",
-        border_style="cyan",
-        padding=(1, 3),
-    )
-
-
-def main_entries(selected):
-    entries = []
     for cat, items in CATEGORIES:
-        n = sum(1 for k, *_ in items if k in selected)
-        total = len(items)
-        tag = f"[{n}/{total} on]"
-        entries.append((f"{cat}  {tag}", "checked = keep/install · unchecked = remove"))
-    entries.append(("Review & Apply", "install missing, uninstall unchecked"))
-    entries.append(("Quit", "exit without changes"))
-    return entries
+        rows.append(("header", cat))
+        for key, *_ in items:
+            rows.append(("item", key))
+    rows.append(("action", "install"))
+    rows.append(("action", "quit"))
+    return rows
 
 
-def main_menu(selected):
-    if not has_tty():
-        return "install"  # non-interactive: install whatever was preselected
-    idx = 0
-    n = len(main_entries(selected))
-    with Live(render_main(idx, selected), console=console,
-              auto_refresh=False, screen=True) as live:
-        while True:
-            key = get_key()
-            if key in ("up", "k"):
-                idx = (idx - 1) % n
-            elif key in ("down", "j"):
-                idx = (idx + 1) % n
-            elif key in ("q", "esc"):
-                return "quit"
-            elif key == "enter":
-                if idx < len(CATEGORIES):
-                    return ("category", CATEGORIES[idx][0])
-                if idx == len(CATEGORIES):
-                    return "install"
-                return "quit"
-            live.update(render_main(idx, selected), refresh=True)
+ROWS = _build_rows()
+SELECTABLE = [i for i, (typ, _) in enumerate(ROWS) if typ != "header"]
+ACTION_LABEL = {"install": "Review & Apply", "quit": "Quit"}
 
 
-# ----- UI: per-category checklist ------------------------------------------
+def render_selector(idx, selected):
+    # Window the rows so a tall catalog still fits / scrolls within the panel.
+    height = console.size.height or 40
+    avail = max(8, height - 9)  # leave room for banner + borders + subtitle
+    show_banner = avail > len(ROWS) + 6
+    if show_banner:
+        avail -= 7
+    start = 0
+    if len(ROWS) > avail:
+        start = max(0, min(idx - avail // 2, len(ROWS) - avail))
+    window = list(enumerate(ROWS))[start:start + avail]
 
-def render_checklist(cat, items, idx, selected):
-    rows = []
-    for i, (key, label, desc, deps) in enumerate(items):
-        on = i == idx
-        box = "[x]" if key in selected else "[ ]"
-        marker = "▸" if on else " "
-        if on:
-            line = Text(f" {marker} {box} {label}", style="bold reverse cyan")
-            line.append(f"   {desc}", style="reverse")
-        else:
-            checked = key in selected
-            line = Text(f" {marker} ", style="cyan")
-            line.append(f"{box} ", style="green" if checked else "dim")
-            line.append(label, style="bold" if checked else "")
-            line.append(f"   {desc}", style="dim")
-        rows.append(line)
+    lines = []
+    for ridx, (typ, val) in window:
+        on = ridx == idx
+        if typ == "header":
+            n = sum(1 for k, *_ in dict(CATEGORIES)[val] if k in selected)
+            t = Text(f"  {val} ", style="bold magenta")
+            t.append(f"({n}/{len(dict(CATEGORIES)[val])})", style="dim")
+            lines.append(t)
+        elif typ == "item":
+            label, desc, _ = ITEM[val]
+            checked = val in selected
+            box = "[x]" if checked else "[ ]"
+            marker = "▸" if on else " "
+            if on:
+                t = Text(f" {marker}   {box} {label}", style="bold reverse cyan")
+                t.append(f"  {desc}", style="reverse")
+            else:
+                t = Text(f" {marker}   ", style="cyan")
+                t.append(f"{box} ", style="green" if checked else "dim")
+                t.append(label, style="bold" if checked else "")
+                t.append(f"  {desc}", style="dim")
+            lines.append(t)
+        else:  # action button
+            marker = "▸" if on else " "
+            style = "bold reverse green" if on else "bold green"
+            lines.append(Text(f" {marker} {ACTION_LABEL[val]}", style=style))
+
+    head = []
+    if show_banner:
+        head = [Align.center(Text(BANNER, style="bold cyan")), Text("")]
     return Panel(
-        Group(*rows),
-        title=f"[bold cyan]{cat}[/]",
-        subtitle="[dim]space toggle (on=keep/install, off=remove) · a all · n none · enter back[/]",
+        Group(*head, *lines),
+        title="[bold cyan]bootstrap[/]",
+        subtitle="[dim]↑/↓ move · space toggle (on=keep/install, off=remove) · "
+                 "a all · n none · enter · q quit[/]",
         border_style="cyan",
         padding=(1, 2),
     )
 
 
-def checklist(cat, items, selected):
+def selector(selected):
+    """One screen for everything. Returns 'install' or 'quit'."""
     if not has_tty():
-        return
-    idx = 0
-    with Live(render_checklist(cat, items, idx, selected), console=console,
+        return "install"
+    pos = 0
+    with Live(render_selector(SELECTABLE[pos], selected), console=console,
               auto_refresh=False, screen=True) as live:
         while True:
+            idx = SELECTABLE[pos]
             key = get_key()
             if key in ("up", "k"):
-                idx = (idx - 1) % len(items)
+                pos = (pos - 1) % len(SELECTABLE)
             elif key in ("down", "j"):
-                idx = (idx + 1) % len(items)
-            elif key == "space":
-                k = items[idx][0]
-                selected.discard(k) if k in selected else selected.add(k)
+                pos = (pos + 1) % len(SELECTABLE)
+            elif key in ("q", "esc"):
+                return "quit"
             elif key == "a":
-                for it in items:
-                    selected.add(it[0])
+                selected |= MENU_KEYS
             elif key == "n":
-                for it in items:
-                    selected.discard(it[0])
-            elif key in ("enter", "esc", "q"):
-                return
-            live.update(render_checklist(cat, items, idx, selected), refresh=True)
+                selected.difference_update(MENU_KEYS)
+            elif key == "space":
+                typ, val = ROWS[idx]
+                if typ == "item":
+                    selected.discard(val) if val in selected else selected.add(val)
+            elif key == "enter":
+                typ, val = ROWS[idx]
+                if typ == "action":
+                    return val
+                if typ == "item":
+                    selected.discard(val) if val in selected else selected.add(val)
+            live.update(render_selector(SELECTABLE[pos], selected), refresh=True)
 
 
 # ----- dependency expansion + confirm --------------------------------------
@@ -1497,15 +1482,10 @@ def main():
 
     selected = set(installed)
     while True:
-        action = main_menu(selected)
+        action = selector(selected)
         if action == "quit":
             console.print("Bye.")
             return
-        if isinstance(action, tuple) and action[0] == "category":
-            cat = action[1]
-            items = next(its for c, its in CATEGORIES if c == cat)
-            checklist(cat, items, selected)
-            continue
         if action == "install":  # "Review & Apply"
             console.clear()
             to_install, to_remove = plan(installed, selected)
@@ -1517,7 +1497,7 @@ def main():
             if confirm_apply(to_install, to_remove):
                 do_apply(installed, selected)
                 return
-            # declined -> back to menu
+            # declined -> back to the selector
 
 
 if __name__ == "__main__":
