@@ -103,6 +103,17 @@ pkg_name() {
     openssh-server:zypper) echo openssh ;;
     openssh-server:apk)    echo openssh ;;
 
+    tmux:*) echo tmux ;;
+
+    docker:apt)    echo docker.io ;;
+    docker:dnf)    echo docker ;;
+    docker:yum)    echo docker ;;
+    docker:pacman) echo docker ;;
+    docker:zypper) echo docker ;;
+    docker:apk)    echo docker ;;
+
+    podman:*) echo podman ;;
+
     *) echo "" ;;
   esac
 }
@@ -150,7 +161,7 @@ pm_install "${PREREQS[@]}"
 
 # ----- optional package menu ----------------------------------------------
 
-OPTIONAL=(git build-essential rust go nodejs openssh-server)
+OPTIONAL=(git build-essential rust go nodejs openssh-server tmux docker podman)
 
 declare -a SELECTED=()
 if [ "$NONINTERACTIVE" -eq 1 ]; then
@@ -342,6 +353,101 @@ if want openssh-server; then
     $SUDO systemctl enable --now "$SVC" || warn "Could not enable $SVC; check service name."
   else
     warn "No systemd detected; start sshd manually."
+  fi
+fi
+
+# ----- enable + group docker if installed ---------------------------------
+
+if want docker; then
+  if need_cmd systemctl; then
+    log "Enabling docker service"
+    $SUDO systemctl enable --now docker || warn "Could not enable docker service."
+  fi
+  if [ "$TARGET_USER" != "root" ]; then
+    log "Adding $TARGET_USER to docker group (log out + back in to take effect)"
+    $SUDO usermod -aG docker "$TARGET_USER" || warn "Failed to add user to docker group."
+  fi
+fi
+
+# ----- tmux + TPM + catppuccin --------------------------------------------
+
+if want tmux; then
+  log "Setting up tmux config + plugins"
+
+  TMUX_CONF="$TARGET_HOME/.tmux.conf"
+  TMUX_PLUGIN_DIR="$TARGET_HOME/.config/tmux/plugins"
+  TPM_DIR="$TARGET_HOME/.tmux/plugins/tpm"
+
+  if [ -f "$TMUX_CONF" ] && [ ! -f "$TMUX_CONF.bak" ]; then
+    log "Backing up existing ~/.tmux.conf to ~/.tmux.conf.bak"
+    run_as_user "cp '$TMUX_CONF' '$TMUX_CONF.bak'"
+  fi
+
+  run_as_user "mkdir -p '$TMUX_PLUGIN_DIR/catppuccin' '$TMUX_PLUGIN_DIR/tmux-plugins' '$TARGET_HOME/.tmux/plugins'"
+
+  # Plugins at paths referenced by the config.
+  if [ ! -d "$TMUX_PLUGIN_DIR/catppuccin/tmux" ]; then
+    run_as_user "git clone --depth=1 -b v2.1.3 https://github.com/catppuccin/tmux.git '$TMUX_PLUGIN_DIR/catppuccin/tmux'"
+  else
+    run_as_user "git -C '$TMUX_PLUGIN_DIR/catppuccin/tmux' pull --ff-only || true"
+  fi
+
+  if [ ! -d "$TMUX_PLUGIN_DIR/tmux-plugins/tmux-cpu" ]; then
+    run_as_user "git clone --depth=1 https://github.com/tmux-plugins/tmux-cpu.git '$TMUX_PLUGIN_DIR/tmux-plugins/tmux-cpu'"
+  else
+    run_as_user "git -C '$TMUX_PLUGIN_DIR/tmux-plugins/tmux-cpu' pull --ff-only || true"
+  fi
+
+  if [ ! -d "$TMUX_PLUGIN_DIR/tmux-plugins/tmux-battery" ]; then
+    run_as_user "git clone --depth=1 https://github.com/tmux-plugins/tmux-battery.git '$TMUX_PLUGIN_DIR/tmux-plugins/tmux-battery'"
+  else
+    run_as_user "git -C '$TMUX_PLUGIN_DIR/tmux-plugins/tmux-battery' pull --ff-only || true"
+  fi
+
+  # TPM.
+  if [ ! -d "$TPM_DIR" ]; then
+    run_as_user "git clone --depth=1 https://github.com/tmux-plugins/tpm.git '$TPM_DIR'"
+  else
+    run_as_user "git -C '$TPM_DIR' pull --ff-only || true"
+  fi
+
+  # Write tmux.conf only if absent (don't clobber user edits on re-run).
+  if [ ! -f "$TMUX_CONF" ]; then
+    run_as_user "cat > '$TMUX_CONF'" <<'TMUX_EOF'
+# ~/.tmux.conf
+
+# Options to make tmux more pleasant
+set -g mouse on
+set -g default-terminal "tmux-256color"
+
+# Configure the catppuccin plugin
+set -g @catppuccin_flavor "mocha"
+set -g @catppuccin_window_status_style "rounded"
+
+# Load catppuccin
+run ~/.config/tmux/plugins/catppuccin/tmux/catppuccin.tmux
+# For TPM, instead use `run ~/.tmux/plugins/tmux/catppuccin.tmux`
+
+# Make the status line pretty and add some modules
+set -g status-right-length 100
+set -g status-left-length 100
+set -g status-left ""
+set -g status-right "#{E:@catppuccin_status_application}"
+set -agF status-right "#{E:@catppuccin_status_cpu}"
+set -agF status-right "#{E:@catppuccin_status_ram}"
+set -ag status-right "#{E:@catppuccin_status_session}"
+set -ag status-right "#{E:@catppuccin_status_uptime}"
+set -agF status-right "#{E:@catppuccin_status_battery}"
+
+run ~/.config/tmux/plugins/tmux-plugins/tmux-cpu/cpu.tmux
+run ~/.config/tmux/plugins/tmux-plugins/tmux-battery/battery.tmux
+# Or, if using TPM, just run TPM
+
+# Initialize TPM (keep at the bottom of tmux.conf)
+run '~/.tmux/plugins/tpm/tpm'
+TMUX_EOF
+  else
+    log "~/.tmux.conf exists - leaving untouched (backup at ~/.tmux.conf.bak if changed)"
   fi
 fi
 
