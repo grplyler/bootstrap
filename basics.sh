@@ -9,7 +9,8 @@
 # Prompts (whiptail checklist) for every item; nothing installs unless picked:
 #   zsh, oh-my-zsh, powerlevel10k, meslo-font,
 #   git, build-essential, rust, go, nodejs, openssh-server, tmux, docker, podman,
-#   eza (aliased to ls), zoxide.
+#   eza (aliased to ls), zoxide,
+#   burnit (USB image writer), wizard (pretty launcher) -> installed to ~/.local/bin.
 
 set -euo pipefail
 
@@ -20,6 +21,14 @@ warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit 1; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# Where to fetch the python tools from when running via `curl | bash`.
+RAW_BASE="https://raw.githubusercontent.com/grplyler/bootstrap/master"
+# Directory this script lives in (empty when piped through stdin).
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE:-}" ] && [ -f "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 # ----- detect OS -----------------------------------------------------------
 
@@ -164,6 +173,18 @@ pkg_name() {
 
     zoxide:*) echo zoxide ;;
 
+    python3:brew)   echo python ;;
+    python3:pacman) echo python ;;
+    python3:*)      echo python3 ;;
+
+    pip:brew)   echo "" ;;  # bundled with brew python
+    pip:apt)    echo python3-pip ;;
+    pip:dnf)    echo python3-pip ;;
+    pip:yum)    echo python3-pip ;;
+    pip:pacman) echo python-pip ;;
+    pip:zypper) echo python3-pip ;;
+    pip:apk)    echo py3-pip ;;
+
     *) echo "" ;;
   esac
 }
@@ -183,7 +204,7 @@ while [ "$#" -gt 0 ]; do
       done
       ;;
     --help|-h)
-      sed -n '2,12p' "$0" 2>/dev/null || true
+      sed -n '2,13p' "$0" 2>/dev/null || true
       exit 0
       ;;
     *)
@@ -228,6 +249,8 @@ OPTIONAL=(
   podman
   eza
   zoxide
+  burnit
+  wizard
 )
 
 declare -a SELECTED=()
@@ -341,6 +364,36 @@ run_as_user() {
 OMZ_DIR="$TARGET_HOME/.oh-my-zsh"
 ZSHRC="$TARGET_HOME/.zshrc"
 
+LOCAL_BIN="$TARGET_HOME/.local/bin"
+
+# Ensure ~/.local/bin is on PATH for future shells.
+ensure_local_bin_path() {
+  run_as_user "mkdir -p '$LOCAL_BIN'"
+  if [ ! -f "$ZSHRC" ]; then
+    run_as_user "touch '$ZSHRC'"
+  fi
+  if ! grep -q '\.local/bin' "$ZSHRC" 2>/dev/null; then
+    log "Adding ~/.local/bin to PATH in $ZSHRC"
+    run_as_user "echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> '$ZSHRC'"
+  fi
+}
+
+# Install a python tool from tools/<name> into ~/.local/bin.
+# Prefers a local copy (dev checkout); otherwise downloads from RAW_BASE.
+install_tool() {
+  local tool="$1"
+  ensure_local_bin_path
+  local dest="$LOCAL_BIN/$tool"
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/tools/$tool" ]; then
+    log "Installing $tool -> $dest (from local checkout)"
+    run_as_user "cp '$SCRIPT_DIR/tools/$tool' '$dest'"
+  else
+    log "Installing $tool -> $dest (from $RAW_BASE)"
+    run_as_user "curl -fsSL '$RAW_BASE/tools/$tool' -o '$dest'"
+  fi
+  run_as_user "chmod +x '$dest'"
+}
+
 # ----- oh-my-zsh -----------------------------------------------------------
 
 if want oh-my-zsh; then
@@ -438,11 +491,15 @@ TO_INSTALL_CASK=()
 INSTALL_RUST=0
 INSTALL_NODE_NODESOURCE=0
 INSTALL_XCODE_CLT=0
+INSTALL_BURNIT=0
+INSTALL_WIZARD=0
 
 for opt in "${SELECTED[@]:-}"; do
   case "$opt" in
     # Already handled above or not a distro pkg.
     zsh|git|oh-my-zsh|powerlevel10k|meslo-font) continue ;;
+    burnit) INSTALL_BURNIT=1 ;;
+    wizard) INSTALL_WIZARD=1 ;;
     rust)
       name=$(pkg_name rust)
       if [ -n "$name" ]; then
@@ -518,6 +575,31 @@ if [ "$INSTALL_RUST" -eq 1 ]; then
   log "Installing Rust via rustup"
   run_as_user "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path"
   run_as_user "grep -q 'cargo/env' '$TARGET_HOME/.zshrc' 2>/dev/null || echo '[ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"' >> '$TARGET_HOME/.zshrc'"
+fi
+
+# ----- python tools: burnit + wizard --------------------------------------
+
+if [ "$INSTALL_BURNIT" -eq 1 ] || [ "$INSTALL_WIZARD" -eq 1 ]; then
+  if ! need_cmd python3; then
+    log "Installing python3"
+    pm_install "$(pkg_name python3)"
+  fi
+fi
+
+if [ "$INSTALL_BURNIT" -eq 1 ]; then
+  install_tool burnit
+  log "burnit installed. Run: burnit /path/to/image.iso"
+fi
+
+if [ "$INSTALL_WIZARD" -eq 1 ]; then
+  # wizard uses Rich; it self-installs via pip on first run, so make sure pip exists.
+  PIP_PKG="$(pkg_name pip)"
+  if [ -n "$PIP_PKG" ] && ! run_as_user "python3 -m pip --version" >/dev/null 2>&1; then
+    log "Installing pip (for wizard's Rich UI)"
+    pm_install "$PIP_PKG"
+  fi
+  install_tool wizard
+  log "wizard installed. Run: wizard"
 fi
 
 # ----- eza alias + zoxide init in .zshrc -----------------------------------
@@ -672,4 +754,10 @@ if want meslo-font; then
 fi
 if [ "$OS" = "macos" ] && want docker; then
   log "macOS: launch Docker Desktop once ('open -a Docker') to start the daemon."
+fi
+if want burnit || want wizard; then
+  log "Tools installed to ~/.local/bin (added to PATH in .zshrc; open a new shell)."
+fi
+if want wizard; then
+  log "Launch the menu with: wizard"
 fi

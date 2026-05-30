@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""bootstrap wizard - pretty top-level launcher for the bootstrap toolkit.
+
+A polished arrow-key menu that dispatches to the rest of the toolkit:
+  - run the package installer (basics.sh)
+  - burn a bootable USB drive (burnit)
+  - update the installed tools
+
+Uses Rich for the UI. If Rich is missing it bootstraps it via pip --user
+and re-executes itself, so a fresh box only needs python3 + pip.
+
+Controls: Up/Down (or j/k) to move, Enter to select, q/Esc to quit.
+"""
+
+import os
+import sys
+import shutil
+import subprocess
+
+RAW_BASE = "https://raw.githubusercontent.com/grplyler/bootstrap/master"
+BASICS_URL = f"{RAW_BASE}/basics.sh"
+BURNIT_URL = f"{RAW_BASE}/tools/burnit"
+
+
+# ----- ensure Rich ---------------------------------------------------------
+
+def ensure_rich():
+    try:
+        import rich  # noqa: F401
+        return
+    except ImportError:
+        pass
+    print("Installing 'rich' (one-time)...")
+    rc = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--user", "--quiet", "rich"]
+    ).returncode
+    if rc != 0:
+        print("Failed to install rich. Install it manually:\n"
+              f"    {sys.executable} -m pip install --user rich", file=sys.stderr)
+        sys.exit(1)
+    # Re-exec so the freshly installed package is importable.
+    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+
+
+ensure_rich()
+
+from rich.align import Align          # noqa: E402
+from rich.console import Console, Group  # noqa: E402
+from rich.panel import Panel          # noqa: E402
+from rich.prompt import Prompt        # noqa: E402
+from rich.text import Text            # noqa: E402
+from rich.live import Live            # noqa: E402
+
+console = Console()
+
+BANNER = r"""
+ _                _       _
+| |__   ___   ___| |_ ___| |_ _ __ __ _ _ __
+| '_ \ / _ \ / _ \ __/ __| __| '__/ _` | '_ \
+| |_) | (_) | (_) \__ \__ \ |_| | | (_| | |_) |
+|_.__/ \___/ \___/|___/___/\__|_|  \__,_| .__/
+                                        |_|
+"""
+
+
+# ----- low-level key reader ------------------------------------------------
+
+def get_key():
+    """Read a single keypress. Returns 'up'/'down'/'enter'/'esc' or the char."""
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":  # escape sequence
+            seq = sys.stdin.read(2)
+            return {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(seq, "esc")
+        if ch in ("\r", "\n"):
+            return "enter"
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+# ----- menu ----------------------------------------------------------------
+
+def render_menu(items, idx, title, subtitle):
+    rows = []
+    for i, (label, desc) in enumerate(items):
+        selected = i == idx
+        marker = "▸" if selected else " "
+        if selected:
+            line = Text(f" {marker} {label}", style="bold reverse cyan")
+            line.append(f"   {desc}", style="reverse")
+        else:
+            line = Text(f" {marker} ", style="cyan")
+            line.append(label, style="bold")
+            line.append(f"   {desc}", style="dim")
+        rows.append(line)
+    body = Group(*rows)
+    return Panel(
+        body,
+        title=f"[bold cyan]{title}[/]",
+        subtitle=f"[dim]{subtitle}[/]",
+        border_style="cyan",
+        padding=(1, 2),
+    )
+
+
+def menu(items, title="bootstrap", subtitle="↑/↓ move · enter select · q quit"):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return menu_fallback(items, title)
+    idx = 0
+    with Live(render_menu(items, idx, title, subtitle),
+              console=console, auto_refresh=False, screen=False) as live:
+        while True:
+            key = get_key()
+            if key in ("up", "k"):
+                idx = (idx - 1) % len(items)
+            elif key in ("down", "j"):
+                idx = (idx + 1) % len(items)
+            elif key == "enter":
+                return idx
+            elif key in ("q", "esc"):
+                return None
+            live.update(render_menu(items, idx, title, subtitle))
+            live.refresh()
+
+
+def menu_fallback(items, title):
+    console.print(f"[bold cyan]{title}[/]")
+    for i, (label, desc) in enumerate(items):
+        console.print(f"  [cyan]{i+1}[/]) [bold]{label}[/]  [dim]{desc}[/]")
+    ans = Prompt.ask("Pick", default="q")
+    if ans.isdigit() and 1 <= int(ans) <= len(items):
+        return int(ans) - 1
+    return None
+
+
+# ----- locate sibling tools ------------------------------------------------
+
+def find_tool(name, url):
+    """Prefer an installed/sibling copy; fall back to downloading."""
+    found = shutil.which(name)
+    if found:
+        return found, False
+    here = os.path.dirname(os.path.abspath(__file__))
+    sibling = os.path.join(here, name)
+    if os.path.isfile(sibling):
+        return sibling, False
+    # Download to a temp file.
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=f"{name}-")
+    os.close(fd)
+    console.print(f"[dim]Fetching {name}...[/]")
+    rc = subprocess.run(["curl", "-fsSL", url, "-o", tmp]).returncode
+    if rc != 0:
+        die(f"Could not fetch {name} from {url}")
+    os.chmod(tmp, 0o755)
+    return tmp, True
+
+
+def die(msg):
+    console.print(f"[bold red]xx[/] {msg}")
+    sys.exit(1)
+
+
+def pause():
+    console.print()
+    console.input("[dim]Press Enter to return to the menu...[/]")
+
+
+# ----- actions -------------------------------------------------------------
+
+def action_install():
+    console.print(Panel("[bold]Package installer[/]\n"
+                        "Runs basics.sh — a checklist of shells, fonts, dev tools, "
+                        "containers and more. Nothing installs unless you tick it.",
+                        border_style="green"))
+    here = os.path.dirname(os.path.abspath(__file__))
+    local = os.path.join(os.path.dirname(here), "basics.sh")
+    if os.path.isfile(local):
+        cmd = ["bash", local]
+    else:
+        cmd = ["bash", "-c", f"curl -fsSL {BASICS_URL} | bash"]
+    subprocess.run(cmd)
+    pause()
+
+
+def action_burn():
+    console.print(Panel("[bold]Burn a bootable USB[/]\n"
+                        "Writes an .iso/.img to a USB drive. Destructive — you pick "
+                        "the disk and confirm before anything is written.",
+                        border_style="red"))
+    image = Prompt.ask("Path to image (.iso/.img)").strip()
+    image = os.path.expanduser(image)
+    if not image or not os.path.isfile(image):
+        console.print("[red]Image not found.[/]")
+        pause()
+        return
+    path, temp = find_tool("burnit", BURNIT_URL)
+    try:
+        subprocess.run([sys.executable, path, image])
+    finally:
+        if temp:
+            os.unlink(path)
+    pause()
+
+
+def action_update():
+    bindir = os.path.expanduser("~/.local/bin")
+    os.makedirs(bindir, exist_ok=True)
+    for name, url in (("burnit", BURNIT_URL), ("wizard", f"{RAW_BASE}/tools/wizard")):
+        dest = os.path.join(bindir, name)
+        console.print(f"[dim]Updating {name}...[/]")
+        rc = subprocess.run(["curl", "-fsSL", url, "-o", dest]).returncode
+        if rc == 0:
+            os.chmod(dest, 0o755)
+            console.print(f"[green]==[/] {dest}")
+        else:
+            console.print(f"[red]xx[/] failed: {name}")
+    pause()
+
+
+# ----- main ----------------------------------------------------------------
+
+ITEMS = [
+    ("Install packages", "shells, fonts, dev tools, containers (basics.sh)"),
+    ("Burn bootable USB", "write an .iso/.img to a thumb drive (burnit)"),
+    ("Update tools",      "re-download burnit + wizard into ~/.local/bin"),
+    ("Quit",              "exit the wizard"),
+]
+ACTIONS = [action_install, action_burn, action_update, None]
+
+
+def header():
+    console.clear()
+    console.print(Align.center(Text(BANNER, style="bold cyan")))
+    console.print(Align.center(Text("fresh-box bootstrap toolkit", style="dim")))
+    console.print()
+
+
+def main():
+    while True:
+        header()
+        choice = menu(ITEMS)
+        if choice is None or ACTIONS[choice] is None:
+            console.print("[dim]Bye.[/]")
+            return
+        console.print()
+        ACTIONS[choice]()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/]")
+        sys.exit(130)
