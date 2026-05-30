@@ -1622,7 +1622,7 @@ def confirm_apply(to_install, to_remove):
         console.print("[bold red]These items will be UNINSTALLED and their config removed.[/]")
     if not has_tty():
         return True
-    console.print("[bold]Apply these changes? [y/N][/] ", end="")
+    console.print(r"[bold]Apply these changes? \[y/N][/] ", end="")
     k = get_key()
     console.print(k)
     return k in ("y", "Y")
