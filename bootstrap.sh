@@ -245,6 +245,11 @@ CATEGORIES = [
         ("podman",       "podman",              "daemonless containers",    []),
         ("docker",       "docker",              "containers",               []),
         ("rustdesk",     "rustdesk",            "remote desktop",           []),
+        ("tailscale",    "Tailscale",           "mesh VPN (run 'tailscale up')", []),
+    ]),
+    ("Configuration", [
+        ("disable-wayland","Disable Wayland (basic)", "force X11 in GDM; helps rustdesk headless", []),
+        ("rustdesk-config","Rustdesk",          "static password + headless access mode", ["rustdesk"]),
     ]),
 ]
 
@@ -809,6 +814,103 @@ def install_rustdesk(overwrite=False):
                            "(install flatpak or grab a build from rustdesk.com)")
 
 
+def install_tailscale(overwrite=False):
+    if OS == "macos":
+        pm_install_cask("tailscale", reinstall=overwrite)
+        console.print("[yellow]macOS: launch Tailscale from Applications and sign in.[/]")
+        return
+    # Official installer adds the repo + package for every supported distro.
+    run("curl -fsSL https://tailscale.com/install.sh | sh")
+    if shutil.which("systemctl"):
+        run(f"{sudo_prefix()}systemctl enable --now tailscaled", check=False)
+    console.print("[yellow]Run 'sudo tailscale up' to authenticate this machine.[/]")
+
+
+# ----- configuration -------------------------------------------------------
+
+def _gdm_conf():
+    """Path to the GDM config that holds WaylandEnable, or None."""
+    for p in ("/etc/gdm3/custom.conf", "/etc/gdm/custom.conf"):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def install_disable_wayland(overwrite=False):
+    if OS == "macos":
+        console.print("[yellow]Wayland is Linux-only; nothing to disable on macOS.[/]")
+        return
+    conf = _gdm_conf()
+    if not conf:
+        console.print("[yellow]No GDM config (/etc/gdm*/custom.conf); only applies to "
+                      "GDM desktops. Skipping.[/]")
+        return
+    s = sudo_prefix()
+    run(f"[ -f '{conf}.bak' ] || {s}cp '{conf}' '{conf}.bak'", check=False)
+    # Uncomment / overwrite any existing WaylandEnable line, then ensure it exists.
+    run(f"{s}sed -i 's/^#\\?WaylandEnable=.*/WaylandEnable=false/' '{conf}'", check=False)
+    run(f"grep -q '^WaylandEnable=false' '{conf}' 2>/dev/null || "
+        f"{s}sed -i '/^\\[daemon\\]/a WaylandEnable=false' '{conf}'", check=False)
+    console.print("[yellow]Wayland disabled in GDM; reboot (or restart GDM) for X11.[/]")
+
+
+RUSTDESK_HEADLESS_MARKER = "/etc/bootstrap-rustdesk-headless"
+RUSTDESK_PW = None  # captured during install, surfaced in the final tips
+
+
+def _gen_password(n=14):
+    import secrets
+    import string
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def _read_line(prompt_text, default=""):
+    """Read one line of input from the TTY; falls back to default with no TTY."""
+    console.print(prompt_text, end="")
+    if not has_tty():
+        console.print("[dim](auto)[/]")
+        return default
+    buf = ""
+    while True:
+        k = get_key()
+        if k == "enter":
+            console.print("")
+            return buf or default
+        if k == "esc":
+            console.print("")
+            return default
+        if k in ("\x7f", "\b"):  # backspace
+            buf = buf[:-1]
+            continue
+        if len(k) == 1 and k.isprintable():
+            buf += k
+
+
+def install_rustdesk_config(overwrite=False):
+    global RUSTDESK_PW
+    if OS == "macos":
+        console.print("[yellow]Headless config is Linux-only; in the RustDesk app set a "
+                      "permanent password under Settings → Security.[/]")
+        return
+    pw = os.environ.get("BOOTSTRAP_RUSTDESK_PASSWORD", "").strip()
+    if not pw and has_tty():
+        pw = _read_line("[bold]RustDesk static password (enter to autogenerate): [/]").strip()
+    if not pw:
+        pw = _gen_password()
+    RUSTDESK_PW = pw
+    s = sudo_prefix()
+    # Background service = unattended/headless access.
+    if shutil.which("systemctl"):
+        run(f"{s}systemctl enable --now rustdesk 2>/dev/null || "
+            f"{s}systemctl enable --now rustdesk.service", check=False)
+    # Set the permanent password (talks to the running service).
+    run(f"{s}rustdesk --password {sh_quote(pw)}", check=False)
+    run(f"{s}touch '{RUSTDESK_HEADLESS_MARKER}'", check=False)
+    # Show the machine's RustDesk ID for convenience.
+    run(f"{s}rustdesk --get-id 2>/dev/null || true", check=False)
+
+
 # ----- programming languages -----------------------------------------------
 
 def _go_arch():
@@ -1047,6 +1149,16 @@ def _sshd_present():
     return _which("sshd") or _which("ssh")
 
 
+def _wayland_disabled():
+    if OS == "macos":
+        return None
+    conf = _gdm_conf()
+    if not conf:
+        return None
+    rc = subprocess.run(["bash", "-c", f"grep -q '^WaylandEnable=false' '{conf}'"]).returncode
+    return conf if rc == 0 else None
+
+
 DETECTORS = {
     "git":           lambda: _which("git"),
     "zsh":           lambda: _which("zsh"),
@@ -1093,6 +1205,10 @@ DETECTORS = {
     "podman":        lambda: _which("podman"),
     "docker":        lambda: _which("docker"),
     "rustdesk":      lambda: _which("rustdesk"),
+    "tailscale":     lambda: _which("tailscale"),
+    "disable-wayland": _wayland_disabled,
+    "rustdesk-config": lambda: (RUSTDESK_HEADLESS_MARKER
+                         if os.path.exists(RUSTDESK_HEADLESS_MARKER) else None),
 }
 
 
@@ -1134,6 +1250,9 @@ INSTALLERS = {
     "podman": install_podman,
     "docker": install_docker,
     "rustdesk": install_rustdesk,
+    "tailscale": install_tailscale,
+    "disable-wayland": install_disable_wayland,
+    "rustdesk-config": install_rustdesk_config,
 }
 
 # Install order: deps first, then the rest in catalog order.
@@ -1142,7 +1261,8 @@ ORDER = ["git", "zsh", "oh-my-zsh", "powerlevel10k", "meslo-font",
          "htop", "btop",
          "rust", "go", "nodejs", "vlang", "odin", "uv",
          "claude-code", "vscode", "rtlsdr", "gqrx", "sdrpp",
-         "openssh-server", "podman", "docker", "rustdesk"]
+         "openssh-server", "podman", "docker", "rustdesk", "tailscale",
+         "disable-wayland", "rustdesk-config"]
 
 
 # ----- uninstallers --------------------------------------------------------
@@ -1336,6 +1456,40 @@ def uninstall_rustdesk():
         run(f"{sudo_prefix()}rm -f /usr/bin/rustdesk", check=False)
 
 
+def uninstall_tailscale():
+    if OS == "macos":
+        pm_uninstall_cask("tailscale")
+        return
+    s = sudo_prefix()
+    if shutil.which("systemctl"):
+        run(f"{s}systemctl disable --now tailscaled", check=False)
+    pm_remove("tailscale")
+    run(f"{s}rm -rf /var/lib/tailscale", check=False)
+
+
+def uninstall_disable_wayland():
+    if OS == "macos":
+        return
+    conf = _gdm_conf()
+    if not conf:
+        return
+    s = sudo_prefix()
+    # Restore our backup if present, else just comment the line back out.
+    run(f"if [ -f '{conf}.bak' ]; then {s}mv '{conf}.bak' '{conf}'; "
+        f"else {s}sed -i 's/^WaylandEnable=false/#WaylandEnable=false/' '{conf}'; fi",
+        check=False)
+
+
+def uninstall_rustdesk_config():
+    if OS == "macos":
+        return
+    s = sudo_prefix()
+    run(f"{s}rustdesk --password '' 2>/dev/null || true", check=False)
+    if shutil.which("systemctl"):
+        run(f"{s}systemctl disable --now rustdesk 2>/dev/null || true", check=False)
+    run(f"{s}rm -f '{RUSTDESK_HEADLESS_MARKER}'", check=False)
+
+
 UNINSTALLERS = {
     "zsh": uninstall_zsh,
     "oh-my-zsh": uninstall_omz,
@@ -1363,6 +1517,9 @@ UNINSTALLERS = {
     "podman": uninstall_podman,
     "docker": uninstall_docker,
     "rustdesk": uninstall_rustdesk,
+    "tailscale": uninstall_tailscale,
+    "disable-wayland": uninstall_disable_wayland,
+    "rustdesk-config": uninstall_rustdesk_config,
 }
 
 # Menu-visible keys (everything except implicit deps like `git`).
@@ -1432,6 +1589,13 @@ def do_apply(installed, keep):
     if "rtlsdr" in final:
         tips.append("Replug your RTL-SDR dongle (or reboot) so the udev rules + "
                     "DVB blacklist take effect; test with 'rtl_test'.")
+    if "tailscale" in final and OS != "macos":
+        tips.append("Run 'sudo tailscale up' to authenticate this machine on your tailnet.")
+    if "disable-wayland" in final and OS != "macos":
+        tips.append("Reboot (or restart GDM) so the session falls back to X11.")
+    if "rustdesk-config" in final and RUSTDESK_PW:
+        tips.append(f"RustDesk static password set to: {RUSTDESK_PW}  "
+                    "(connect via the ID shown above).")
     if to_remove:
         tips.append("Open a new shell to drop any removed tools from your environment.")
     if tips:
