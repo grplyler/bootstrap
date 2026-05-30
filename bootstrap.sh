@@ -223,6 +223,14 @@ CATEGORIES = [
         ("htop",         "htop",                "interactive process viewer", []),
         ("btop",         "btop",                "resource monitor (prettier)",[]),
     ]),
+    ("Programming Languages", [
+        ("rust",         "Rust",                "rustup toolchain",         []),
+        ("go",           "Go",                  "official toolchain",       []),
+        ("nodejs",       "Node.js",             "via nvm (LTS)",            []),
+        ("vlang",        "V (vlang)",           "compiled from source",     ["git"]),
+        ("odin",         "Odin",                "prebuilt / brew",          []),
+        ("uv",           "uv",                  "Python pkg/proj manager",  []),
+    ]),
     ("Services", [
         ("openssh-server","openssh-server",     "SSH daemon (enabled)",     []),
         ("podman",       "podman",              "daemonless containers",    []),
@@ -328,7 +336,7 @@ def main_menu(selected):
     idx = 0
     n = len(main_entries(selected))
     with Live(render_main(idx, selected), console=console,
-              auto_refresh=False, screen=False) as live:
+              auto_refresh=False, screen=True) as live:
         while True:
             key = get_key()
             if key in ("up", "k"):
@@ -378,7 +386,7 @@ def checklist(cat, items, selected):
         return
     idx = 0
     with Live(render_checklist(cat, items, idx, selected), console=console,
-              auto_refresh=False, screen=False) as live:
+              auto_refresh=False, screen=True) as live:
         while True:
             key = get_key()
             if key in ("up", "k"):
@@ -553,14 +561,25 @@ def install_git(overwrite=False):
 
 def install_omz(overwrite=False):
     omz = os.path.join(TARGET_HOME, ".oh-my-zsh")
-    if os.path.isdir(omz):
-        if not overwrite:
-            console.print("[dim]oh-my-zsh already present[/]")
-            return
+    present = os.path.isdir(omz)
+    if present and overwrite:
         run(f"rm -rf '{omz}'", as_user=True)
-    run('RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c '
-        '"$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"',
-        as_user=True)
+        present = False
+    if present:
+        console.print("[dim]oh-my-zsh already present[/]")
+    else:
+        run('RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c '
+            '"$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"',
+            as_user=True)
+    # KEEP_ZSHRC=yes leaves any pre-existing .zshrc (incl. an empty one we may
+    # have touched earlier) untouched, so the installer won't add its source
+    # line. Guarantee the rc actually loads oh-my-zsh.
+    run(f"touch '{ZSHRC}'", as_user=True)
+    if not in_zshrc("oh-my-zsh.sh"):
+        append_zshrc_once('export ZSH="$HOME/.oh-my-zsh"',
+                          'export ZSH="$HOME/.oh-my-zsh"')
+        append_zshrc_once("ZSH_THEME=", 'ZSH_THEME="robbyrussell"')
+        append_zshrc_once("oh-my-zsh.sh", 'source $ZSH/oh-my-zsh.sh')
 
 
 def install_p10k(overwrite=False):
@@ -776,6 +795,92 @@ def install_rustdesk(overwrite=False):
                            "(install flatpak or grab a build from rustdesk.com)")
 
 
+# ----- programming languages -----------------------------------------------
+
+def _go_arch():
+    return "arm64" if ARCH in ("aarch64", "arm64") else "amd64"
+
+
+def install_rust(overwrite=False):
+    run("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | "
+        "sh -s -- -y --default-toolchain stable --no-modify-path", as_user=True)
+    append_zshrc_once("cargo/env", '[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"')
+    if overwrite:
+        run('export PATH="$HOME/.cargo/bin:$PATH"; rustup update || true',
+            as_user=True, check=False)
+
+
+def install_go(overwrite=False):
+    if OS == "macos":
+        pm_install("go", reinstall=overwrite)
+        return
+    arch = _go_arch()
+    ver = subprocess.run(
+        ["bash", "-c", "curl -fsSL 'https://go.dev/VERSION?m=text' | head -n1"],
+        capture_output=True, text=True).stdout.strip() or "go1.22.5"
+    tar = f"{ver}.linux-{arch}.tar.gz"
+    s = sudo_prefix()
+    run(f"curl -fL 'https://go.dev/dl/{tar}' -o /tmp/{tar}")
+    run(f"{s}rm -rf /usr/local/go && {s}tar -C /usr/local -xzf /tmp/{tar}")
+    append_zshrc_once("/usr/local/go/bin", 'export PATH="$PATH:/usr/local/go/bin"')
+
+
+def install_nodejs(overwrite=False):
+    # nvm: the canonical sh installer. It appends nvm init to the shell rc itself.
+    run("curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash",
+        as_user=True)
+    run('export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
+        'nvm install --lts', as_user=True, check=False)
+
+
+def install_vlang(overwrite=False):
+    vdir = os.path.join(TARGET_HOME, ".vlang")
+    if os.path.isdir(vdir) and overwrite:
+        run(f"rm -rf '{vdir}'", as_user=True)
+    if os.path.isdir(vdir):
+        run(f"git -C '{vdir}' pull --ff-only || true", as_user=True, check=False)
+    else:
+        run(f"git clone --depth=1 https://github.com/vlang/v '{vdir}'", as_user=True)
+    if OS == "linux" and not (shutil.which("cc") or shutil.which("gcc")):
+        pm_install("gcc", "make")
+    run(f"make -C '{vdir}'", as_user=True)
+    # Try a system-wide symlink; fall back to PATH if no sudo.
+    if SUDO or os.geteuid() == 0:
+        run(f"{sudo_prefix()}'{vdir}/v' symlink", check=False)
+    else:
+        append_zshrc_once(".vlang", f'export PATH="$PATH:{vdir}"')
+
+
+def install_odin(overwrite=False):
+    if OS == "macos":
+        pm_install("odin", reinstall=overwrite)
+        return
+    arch = _go_arch()
+    odir = os.path.join(TARGET_HOME, ".local/odin")
+    url = _github_asset("odin-lang/Odin",
+                        lambda n: "linux" in n.lower() and arch in n.lower()
+                        and n.endswith(".zip"))
+    url = url or _github_asset("odin-lang/Odin",
+                               lambda n: "ubuntu" in n.lower() and n.endswith(".zip"))
+    if not url:
+        raise RuntimeError("no Odin linux release asset found for this arch")
+    if not shutil.which("unzip"):
+        pm_install("unzip")
+    run("curl -fL '%s' -o /tmp/odin.zip" % url)
+    run(f"rm -rf '{odir}' && mkdir -p '{odir}'", as_user=True)
+    run(f"unzip -q /tmp/odin.zip -d '{odir}'", as_user=True)
+    # Releases sometimes nest the binary one dir deep; flatten if so.
+    run(f"[ -x '{odir}/odin' ] || (d=$(dirname \"$(find '{odir}' -name odin -type f | head -n1)\"); "
+        f"[ -n \"$d\" ] && cp -r \"$d\"/* '{odir}/') || true", as_user=True, check=False)
+    run(f"chmod +x '{odir}/odin' 2>/dev/null || true", as_user=True, check=False)
+    append_zshrc_once(".local/odin", f'export PATH="$PATH:{odir}"')
+
+
+def install_uv(overwrite=False):
+    # Official astral installer; works on Linux + macOS, appends env to the rc.
+    run("curl -LsSf https://astral.sh/uv/install.sh | sh", as_user=True)
+
+
 # ----- detection: is it already installed / configured? --------------------
 
 def _which(name):
@@ -814,6 +919,21 @@ DETECTORS = {
                          os.path.join(TARGET_HOME, ".tmux.conf")),
     "htop":          lambda: _which("htop"),
     "btop":          lambda: _which("btop"),
+    "rust":          lambda: _which("rustc") or _which("cargo")
+                         or (os.path.join(TARGET_HOME, ".cargo/bin/cargo")
+                             if os.path.exists(os.path.join(TARGET_HOME, ".cargo/bin/cargo")) else None),
+    "go":            lambda: _which("go") or ("/usr/local/go/bin/go"
+                         if os.path.exists("/usr/local/go/bin/go") else None),
+    "nodejs":        lambda: _which("node") or (os.path.join(TARGET_HOME, ".nvm")
+                         if os.path.isdir(os.path.join(TARGET_HOME, ".nvm")) else None),
+    "vlang":         lambda: _which("v") or (os.path.join(TARGET_HOME, ".vlang/v")
+                         if os.path.exists(os.path.join(TARGET_HOME, ".vlang/v")) else None),
+    "odin":          lambda: _which("odin") or (os.path.join(TARGET_HOME, ".local/odin/odin")
+                         if os.path.exists(os.path.join(TARGET_HOME, ".local/odin/odin")) else None),
+    "uv":            lambda: _which("uv") or next(
+                         (p for p in (os.path.join(TARGET_HOME, ".local/bin/uv"),
+                                      os.path.join(TARGET_HOME, ".cargo/bin/uv"))
+                          if os.path.exists(p)), None),
     "openssh-server": _sshd_present,
     "podman":        lambda: _which("podman"),
     "docker":        lambda: _which("docker"),
@@ -861,6 +981,12 @@ INSTALLERS = {
     "tmux-config": install_tmux_config,
     "htop": install_htop,
     "btop": install_btop,
+    "rust": install_rust,
+    "go": install_go,
+    "nodejs": install_nodejs,
+    "vlang": install_vlang,
+    "odin": install_odin,
+    "uv": install_uv,
     "openssh-server": install_openssh,
     "podman": install_podman,
     "docker": install_docker,
@@ -870,7 +996,9 @@ INSTALLERS = {
 # Install order: deps first, then the rest in catalog order.
 ORDER = ["git", "zsh", "oh-my-zsh", "powerlevel10k", "meslo-font",
          "tmux", "tpm", "tmux-config", "eza", "zoxide",
-         "htop", "btop", "openssh-server", "podman", "docker", "rustdesk"]
+         "htop", "btop",
+         "rust", "go", "nodejs", "vlang", "odin", "uv",
+         "openssh-server", "podman", "docker", "rustdesk"]
 
 
 def do_install(selected):
@@ -917,6 +1045,8 @@ def do_install(selected):
         tips.append("Set your terminal font to 'MesloLGS NF'.")
     if "tmux-config" in selected:
         tips.append("In tmux press prefix + I to install plugins via tpm.")
+    if selected & {"rust", "go", "nodejs", "vlang", "odin", "uv"}:
+        tips.append("Open a new shell so the language toolchains land on your PATH.")
     if tips:
         console.print(Panel("\n".join(f"• {t}" for t in tips),
                             title="[bold]Next steps[/]", border_style="yellow", padding=(1, 2)))
