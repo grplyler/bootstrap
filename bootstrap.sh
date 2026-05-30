@@ -1631,7 +1631,9 @@ def confirm_apply(to_install, to_remove):
 def main():
     # Pre-check whatever is already installed; the checkbox state is the
     # desired state. Checked = keep/install, unchecked = remove if present.
-    installed = {k for k in MENU_KEYS if detect(k)}
+    # Scan ORDER (not just MENU_KEYS) so implicit deps like `git` count as
+    # installed and don't get reinstalled every run.
+    installed = {k for k in ORDER if detect(k)}
 
     if not has_tty():
         # Non-interactive: install everything missing, remove nothing.
