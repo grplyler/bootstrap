@@ -231,6 +231,10 @@ CATEGORIES = [
         ("odin",         "Odin",                "prebuilt / brew",          []),
         ("uv",           "uv",                  "Python pkg/proj manager",  []),
     ]),
+    ("Dev Tools", [
+        ("claude-code",  "Claude Code",         "Anthropic CLI agent",      []),
+        ("vscode",       "VS Code",             "editor",                   []),
+    ]),
     ("Services", [
         ("openssh-server","openssh-server",     "SSH daemon (enabled)",     []),
         ("podman",       "podman",              "daemonless containers",    []),
@@ -881,6 +885,45 @@ def install_uv(overwrite=False):
     run("curl -LsSf https://astral.sh/uv/install.sh | sh", as_user=True)
 
 
+# ----- dev tools -----------------------------------------------------------
+
+def install_claude_code(overwrite=False):
+    # Native installer; drops `claude` into ~/.local/bin and appends PATH.
+    run("curl -fsSL https://claude.ai/install.sh | bash", as_user=True)
+    append_zshrc_once('.local/bin', 'export PATH="$HOME/.local/bin:$PATH"')
+
+
+def _code_arch():
+    return "arm64" if ARCH in ("aarch64", "arm64") else "x64"
+
+
+def install_vscode(overwrite=False):
+    if OS == "macos":
+        pm_install_cask("visual-studio-code", reinstall=overwrite)
+        return
+    arch = _code_arch()
+    s = sudo_prefix()
+    base = "https://code.visualstudio.com/sha/download?build=stable&os="
+    if PM == "apt":
+        run(f"curl -fL '{base}linux-deb-{arch}' -o /tmp/vscode.deb")
+        run(f"{s}apt-get install -y /tmp/vscode.deb", check=False)
+        run(f"{s}dpkg -i /tmp/vscode.deb || {s}apt-get -f install -y", check=False)
+    elif PM in ("dnf", "yum"):
+        run(f"curl -fL '{base}linux-rpm-{arch}' -o /tmp/vscode.rpm")
+        run(f"{s}{PM} install -y /tmp/vscode.rpm", check=False)
+    elif PM == "zypper":
+        run(f"curl -fL '{base}linux-rpm-{arch}' -o /tmp/vscode.rpm")
+        run(f"{s}zypper --non-interactive install --allow-unsigned-rpm /tmp/vscode.rpm",
+            check=False)
+    elif shutil.which("flatpak"):
+        run("flatpak install -y flathub com.visualstudio.code", check=False)
+    elif shutil.which("snap"):
+        run(f"{s}snap install code --classic", check=False)
+    else:
+        raise RuntimeError("no install path for VS Code on this distro "
+                           "(install flatpak/snap or use the repo at code.visualstudio.com)")
+
+
 # ----- detection: is it already installed / configured? --------------------
 
 def _which(name):
@@ -934,6 +977,9 @@ DETECTORS = {
                          (p for p in (os.path.join(TARGET_HOME, ".local/bin/uv"),
                                       os.path.join(TARGET_HOME, ".cargo/bin/uv"))
                           if os.path.exists(p)), None),
+    "claude-code":   lambda: _which("claude") or (os.path.join(TARGET_HOME, ".local/bin/claude")
+                         if os.path.exists(os.path.join(TARGET_HOME, ".local/bin/claude")) else None),
+    "vscode":        lambda: _which("code"),
     "openssh-server": _sshd_present,
     "podman":        lambda: _which("podman"),
     "docker":        lambda: _which("docker"),
@@ -987,6 +1033,8 @@ INSTALLERS = {
     "vlang": install_vlang,
     "odin": install_odin,
     "uv": install_uv,
+    "claude-code": install_claude_code,
+    "vscode": install_vscode,
     "openssh-server": install_openssh,
     "podman": install_podman,
     "docker": install_docker,
@@ -998,6 +1046,7 @@ ORDER = ["git", "zsh", "oh-my-zsh", "powerlevel10k", "meslo-font",
          "tmux", "tpm", "tmux-config", "eza", "zoxide",
          "htop", "btop",
          "rust", "go", "nodejs", "vlang", "odin", "uv",
+         "claude-code", "vscode",
          "openssh-server", "podman", "docker", "rustdesk"]
 
 
