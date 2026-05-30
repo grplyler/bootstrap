@@ -8,7 +8,8 @@
 #
 # Prompts (whiptail checklist) for every item; nothing installs unless picked:
 #   zsh, oh-my-zsh, powerlevel10k, meslo-font,
-#   git, build-essential, rust, go, nodejs, openssh-server, tmux, docker, podman.
+#   git, build-essential, rust, go, nodejs, openssh-server, tmux, docker, podman,
+#   eza (aliased to ls), zoxide.
 
 set -euo pipefail
 
@@ -159,6 +160,10 @@ pkg_name() {
 
     podman:*) echo podman ;;
 
+    eza:*)    echo eza ;;
+
+    zoxide:*) echo zoxide ;;
+
     *) echo "" ;;
   esac
 }
@@ -221,6 +226,8 @@ OPTIONAL=(
   tmux
   docker
   podman
+  eza
+  zoxide
 )
 
 declare -a SELECTED=()
@@ -511,6 +518,30 @@ if [ "$INSTALL_RUST" -eq 1 ]; then
   log "Installing Rust via rustup"
   run_as_user "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path"
   run_as_user "grep -q 'cargo/env' '$TARGET_HOME/.zshrc' 2>/dev/null || echo '[ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"' >> '$TARGET_HOME/.zshrc'"
+fi
+
+# ----- eza alias + zoxide init in .zshrc -----------------------------------
+
+if want eza || want zoxide; then
+  if [ ! -f "$ZSHRC" ]; then
+    run_as_user "touch '$ZSHRC'"
+  fi
+fi
+
+if want eza; then
+  if ! grep -q "alias ls='eza" "$ZSHRC" 2>/dev/null; then
+    log "Aliasing ls -> eza in $ZSHRC"
+    run_as_user "echo \"alias ls='eza --group-directories-first'\" >> '$ZSHRC'"
+    run_as_user "echo \"alias ll='eza -l --group-directories-first'\" >> '$ZSHRC'"
+    run_as_user "echo \"alias la='eza -la --group-directories-first'\" >> '$ZSHRC'"
+  fi
+fi
+
+if want zoxide; then
+  if ! grep -q 'zoxide init zsh' "$ZSHRC" 2>/dev/null; then
+    log "Adding zoxide init to $ZSHRC"
+    run_as_user "echo 'eval \"\$(zoxide init zsh)\"' >> '$ZSHRC'"
+  fi
 fi
 
 # ----- enable sshd if installed -------------------------------------------
