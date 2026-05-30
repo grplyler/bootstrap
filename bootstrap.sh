@@ -457,30 +457,42 @@ def sudo_prefix():
     return (SUDO + " ") if SUDO else ""
 
 
-def pm_install(*pkgs):
+def pm_install(*pkgs, reinstall=False):
     pkgs = [p for p in pkgs if p]
     if not pkgs:
         return
     s = sudo_prefix()
     joined = " ".join(pkgs)
-    cmds = {
-        "brew":   f"brew install {joined}",
-        "apt":    f"DEBIAN_FRONTEND=noninteractive {s}apt-get install -y {joined}",
-        "dnf":    f"{s}dnf install -y {joined}",
-        "yum":    f"{s}yum install -y {joined}",
-        "pacman": f"{s}pacman -S --noconfirm --needed {joined}",
-        "zypper": f"{s}zypper --non-interactive install {joined}",
-        "apk":    f"{s}apk add {joined}",
-    }
+    if reinstall:
+        cmds = {
+            "brew":   f"brew reinstall {joined}",
+            "apt":    f"DEBIAN_FRONTEND=noninteractive {s}apt-get install -y --reinstall {joined}",
+            "dnf":    f"{s}dnf reinstall -y {joined}",
+            "yum":    f"{s}yum reinstall -y {joined}",
+            "pacman": f"{s}pacman -S --noconfirm {joined}",
+            "zypper": f"{s}zypper --non-interactive install --force {joined}",
+            "apk":    f"{s}apk add --no-cache {joined}",
+        }
+    else:
+        cmds = {
+            "brew":   f"brew install {joined}",
+            "apt":    f"DEBIAN_FRONTEND=noninteractive {s}apt-get install -y {joined}",
+            "dnf":    f"{s}dnf install -y {joined}",
+            "yum":    f"{s}yum install -y {joined}",
+            "pacman": f"{s}pacman -S --noconfirm --needed {joined}",
+            "zypper": f"{s}zypper --non-interactive install {joined}",
+            "apk":    f"{s}apk add {joined}",
+        }
     run(cmds[PM])
 
 
-def pm_install_cask(*pkgs):
+def pm_install_cask(*pkgs, reinstall=False):
     if PM != "brew":
         return
     pkgs = [p for p in pkgs if p]
     if pkgs:
-        run(f"brew install --cask {' '.join(pkgs)}")
+        verb = "reinstall" if reinstall else "install"
+        run(f"brew {verb} --cask {' '.join(pkgs)}")
 
 
 def pkg_name(logical):
@@ -523,8 +535,8 @@ def in_zshrc(needle):
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
-def install_zsh():
-    pm_install(pkg_name("zsh"))
+def install_zsh(overwrite=False):
+    pm_install(pkg_name("zsh"), reinstall=overwrite)
     append_zshrc_once("export TERM=xterm-256color", "export TERM=xterm-256color")
     # set default shell
     zsh_bin = shutil.which("zsh") or "/bin/zsh"
@@ -534,24 +546,28 @@ def install_zsh():
         run(f"{sudo_prefix()}chsh -s '{zsh_bin}' '{TARGET_USER}'", check=False)
 
 
-def install_git():
-    if not shutil.which("git"):
-        pm_install(pkg_name("git"))
+def install_git(overwrite=False):
+    if overwrite or not shutil.which("git"):
+        pm_install(pkg_name("git"), reinstall=overwrite)
 
 
-def install_omz():
+def install_omz(overwrite=False):
     omz = os.path.join(TARGET_HOME, ".oh-my-zsh")
     if os.path.isdir(omz):
-        console.print("[dim]oh-my-zsh already present[/]")
-        return
+        if not overwrite:
+            console.print("[dim]oh-my-zsh already present[/]")
+            return
+        run(f"rm -rf '{omz}'", as_user=True)
     run('RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c '
         '"$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"',
         as_user=True)
 
 
-def install_p10k():
+def install_p10k(overwrite=False):
     omz = os.path.join(TARGET_HOME, ".oh-my-zsh")
     p10k = os.path.join(omz, "custom/themes/powerlevel10k")
+    if os.path.isdir(p10k) and overwrite:
+        run(f"rm -rf '{p10k}'", as_user=True)
     if os.path.isdir(p10k):
         run(f"git -C '{p10k}' pull --ff-only || true", as_user=True, check=False)
     else:
@@ -567,48 +583,58 @@ def install_p10k():
                           'ZSH_THEME="powerlevel10k/powerlevel10k"')
 
 
-def install_meslo():
+def _font_dir():
     if OS == "macos":
-        font_dir = os.path.join(TARGET_HOME, "Library/Fonts")
-    else:
-        font_dir = os.path.join(TARGET_HOME, ".local/share/fonts")
+        return os.path.join(TARGET_HOME, "Library/Fonts")
+    return os.path.join(TARGET_HOME, ".local/share/fonts")
+
+
+MESLO_FILES = [
+    "MesloLGS%20NF%20Regular.ttf",
+    "MesloLGS%20NF%20Bold.ttf",
+    "MesloLGS%20NF%20Italic.ttf",
+    "MesloLGS%20NF%20Bold%20Italic.ttf",
+]
+
+
+def install_meslo(overwrite=False):
+    font_dir = _font_dir()
     run(f"mkdir -p '{font_dir}'", as_user=True)
     base = "https://github.com/romkatv/powerlevel10k-media/raw/master"
-    files = [
-        "MesloLGS%20NF%20Regular.ttf",
-        "MesloLGS%20NF%20Bold.ttf",
-        "MesloLGS%20NF%20Italic.ttf",
-        "MesloLGS%20NF%20Bold%20Italic.ttf",
-    ]
-    for f in files:
+    for f in MESLO_FILES:
         dest = f.replace("%20", " ")
-        run(f"[ -f '{font_dir}/{dest}' ] || curl -fsSL '{base}/{f}' -o '{font_dir}/{dest}'",
-            as_user=True, check=False)
+        if overwrite:
+            run(f"curl -fsSL '{base}/{f}' -o '{font_dir}/{dest}'", as_user=True, check=False)
+        else:
+            run(f"[ -f '{font_dir}/{dest}' ] || curl -fsSL '{base}/{f}' -o '{font_dir}/{dest}'",
+                as_user=True, check=False)
     if OS == "linux":
         run(f"fc-cache -f '{font_dir}' >/dev/null 2>&1 || true", as_user=True, check=False)
 
 
-def install_tmux():
-    pm_install(pkg_name("tmux"))
+def install_tmux(overwrite=False):
+    pm_install(pkg_name("tmux"), reinstall=overwrite)
 
 
-def install_tpm():
+def install_tpm(overwrite=False):
     tpm = os.path.join(TARGET_HOME, ".tmux/plugins/tpm")
+    if os.path.isdir(tpm) and overwrite:
+        run(f"rm -rf '{tpm}'", as_user=True)
     if os.path.isdir(tpm):
         run(f"git -C '{tpm}' pull --ff-only || true", as_user=True, check=False)
     else:
         run(f"git clone --depth=1 https://github.com/tmux-plugins/tpm.git '{tpm}'", as_user=True)
 
 
-def install_eza():
-    pm_install(pkg_name("eza"))
+def install_eza(overwrite=False):
+    pm_install(pkg_name("eza"), reinstall=overwrite)
     append_zshrc_once("alias ls='eza", "alias ls='eza --group-directories-first'")
     append_zshrc_once("alias ll='eza", "alias ll='eza -l --group-directories-first'")
     append_zshrc_once("alias la='eza", "alias la='eza -la --group-directories-first'")
 
 
-def install_zoxide():
-    pm_install(pkg_name("zoxide"))
+def install_zoxide(overwrite=False):
+    pm_install(pkg_name("zoxide"), reinstall=overwrite)
     append_zshrc_once("zoxide init zsh", 'eval "$(zoxide init zsh)"')
 
 
@@ -644,7 +670,7 @@ run '~/.tmux/plugins/tpm/tpm'
 """
 
 
-def install_tmux_config():
+def install_tmux_config(overwrite=False):
     conf = os.path.join(TARGET_HOME, ".tmux.conf")
     plug = os.path.join(TARGET_HOME, ".config/tmux/plugins")
     run(f"mkdir -p '{plug}/catppuccin' '{plug}/tmux-plugins'", as_user=True)
@@ -666,34 +692,34 @@ def install_tmux_config():
     run(f"printf '%s' {payload} > '{conf}'", as_user=True)
 
 
-def install_htop():
-    pm_install(pkg_name("htop"))
+def install_htop(overwrite=False):
+    pm_install(pkg_name("htop"), reinstall=overwrite)
 
 
-def install_btop():
-    pm_install(pkg_name("btop"))
+def install_btop(overwrite=False):
+    pm_install(pkg_name("btop"), reinstall=overwrite)
 
 
-def install_openssh():
+def install_openssh(overwrite=False):
     if OS == "macos":
         run(f"{sudo_prefix()}systemsetup -setremotelogin on", check=False)
         return
-    pm_install(pkg_name("openssh-server"))
+    pm_install(pkg_name("openssh-server"), reinstall=overwrite)
     if shutil.which("systemctl"):
         svc = "sshd" if PM in ("dnf", "yum", "pacman", "zypper", "apk") else "ssh"
         run(f"{sudo_prefix()}systemctl enable --now {svc}", check=False)
 
 
-def install_podman():
-    pm_install(pkg_name("podman"))
+def install_podman(overwrite=False):
+    pm_install(pkg_name("podman"), reinstall=overwrite)
 
 
-def install_docker():
+def install_docker(overwrite=False):
     if OS == "macos":
-        pm_install_cask("docker")
+        pm_install_cask("docker", reinstall=overwrite)
         console.print("[yellow]macOS: launch Docker Desktop once -> open -a Docker[/]")
         return
-    pm_install(pkg_name("docker"))
+    pm_install(pkg_name("docker"), reinstall=overwrite)
     if shutil.which("systemctl"):
         run(f"{sudo_prefix()}systemctl enable --now docker", check=False)
     if TARGET_USER != "root":
@@ -713,9 +739,9 @@ def _github_asset(repo, predicate):
     return None
 
 
-def install_rustdesk():
+def install_rustdesk(overwrite=False):
     if OS == "macos":
-        pm_install_cask("rustdesk")
+        pm_install_cask("rustdesk", reinstall=overwrite)
         return
     arch = "aarch64" if ARCH in ("aarch64", "arm64") else "x86_64"
     s = sudo_prefix()
@@ -748,6 +774,78 @@ def install_rustdesk():
     else:
         raise RuntimeError("no install path for rustdesk on this distro "
                            "(install flatpak or grab a build from rustdesk.com)")
+
+
+# ----- detection: is it already installed / configured? --------------------
+
+def _which(name):
+    p = shutil.which(name)
+    return p if p else None
+
+
+def _meslo_present():
+    font_dir = _font_dir()
+    first = MESLO_FILES[0].replace("%20", " ")
+    return font_dir if os.path.isfile(os.path.join(font_dir, first)) else None
+
+
+def _sshd_present():
+    if OS == "macos":
+        r = subprocess.run(["systemsetup", "-getremotelogin"],
+                           capture_output=True, text=True)
+        return "Remote Login already on" if "On" in r.stdout else None
+    return _which("sshd") or _which("ssh")
+
+
+DETECTORS = {
+    "git":           lambda: _which("git"),
+    "zsh":           lambda: _which("zsh"),
+    "oh-my-zsh":     lambda: (lambda d: d if os.path.isdir(d) else None)(
+                         os.path.join(TARGET_HOME, ".oh-my-zsh")),
+    "powerlevel10k": lambda: (lambda d: d if os.path.isdir(d) else None)(
+                         os.path.join(TARGET_HOME, ".oh-my-zsh/custom/themes/powerlevel10k")),
+    "meslo-font":    _meslo_present,
+    "tmux":          lambda: _which("tmux"),
+    "tpm":           lambda: (lambda d: d if os.path.isdir(d) else None)(
+                         os.path.join(TARGET_HOME, ".tmux/plugins/tpm")),
+    "eza":           lambda: _which("eza"),
+    "zoxide":        lambda: _which("zoxide"),
+    "tmux-config":   lambda: (lambda d: d if os.path.exists(d) else None)(
+                         os.path.join(TARGET_HOME, ".tmux.conf")),
+    "htop":          lambda: _which("htop"),
+    "btop":          lambda: _which("btop"),
+    "openssh-server": _sshd_present,
+    "podman":        lambda: _which("podman"),
+    "docker":        lambda: _which("docker"),
+    "rustdesk":      lambda: _which("rustdesk"),
+}
+
+
+def detect(key):
+    fn = DETECTORS.get(key)
+    if not fn:
+        return None
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def prompt_action(label, detail):
+    """Already present -> ask skip/overwrite. Returns 'skip' or 'overwrite'."""
+    console.print(f"[yellow]• {label} already present[/] [dim]({detail})[/] "
+                  "— [bold]s[/]kip / [bold]o[/]verwrite? [s] ", end="")
+    if not has_tty():
+        console.print("skip")
+        return "skip"
+    while True:
+        k = get_key()
+        if k in ("o", "O"):
+            console.print("overwrite")
+            return "overwrite"
+        if k in ("s", "S", "enter", "esc", "q"):
+            console.print("skip")
+            return "skip"
 
 
 INSTALLERS = {
@@ -783,19 +881,31 @@ def do_install(selected):
             continue
         label = ITEM.get(key, (key,))[0]
         console.rule(f"[bold cyan]{label}[/]")
+
+        # Already installed / configured? Let the user skip or overwrite.
+        overwrite = False
+        detail = detect(key)
+        if detail:
+            if prompt_action(label, detail) == "skip":
+                results.append((label, "skip", "already present"))
+                continue
+            overwrite = True
+
         try:
-            INSTALLERS[key]()
-            results.append((label, True, ""))
+            INSTALLERS[key](overwrite=overwrite)
+            results.append((label, "ok", "reinstalled" if overwrite else ""))
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]!! {label} failed: {e}[/]")
-            results.append((label, False, str(e)))
+            results.append((label, "fail", str(e)))
 
     # summary
+    badge = {"ok": "[green]ok[/]", "skip": "[yellow]skipped[/]", "fail": "[red]failed[/]"}
     table = Table(show_header=True, header_style="bold", border_style="cyan")
     table.add_column("Item")
     table.add_column("Result")
-    for label, ok, msg in results:
-        table.add_row(label, "[green]ok[/]" if ok else f"[red]failed[/] [dim]{msg}[/]")
+    table.add_column("Notes", style="dim")
+    for label, state, msg in results:
+        table.add_row(label, badge.get(state, state), msg)
     console.print(Panel(table, title="[bold]Summary[/]", border_style="green", padding=(1, 2)))
 
     tips = []
