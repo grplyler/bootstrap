@@ -235,8 +235,10 @@ CATEGORIES = [
         ("claude-code",  "Claude Code",         "Anthropic CLI agent",      []),
         ("vscode",       "VS Code",             "editor",                   []),
     ]),
-    ("Libraries & Packages", [
+    ("SDR Tools", [
         ("rtlsdr",       "rtl-sdr",             "RTL-SDR userland (source)", []),
+        ("gqrx",         "Gqrx",                "SDR receiver GUI",         ["rtlsdr"]),
+        ("sdrpp",        "SDR++",               "cross-platform SDR GUI",   ["rtlsdr"]),
     ]),
     ("Services", [
         ("openssh-server","openssh-server",     "SSH daemon (enabled)",     []),
@@ -544,6 +546,9 @@ def pkg_name(logical):
                             "yum": "libusb1-devel", "pacman": "libusb",
                             "zypper": "libusb-1_0-devel", "apk": "libusb-dev",
                             "brew": "libusb"},
+        "gqrx":           {"apt": "gqrx-sdr", "dnf": "gqrx", "yum": "gqrx",
+                            "pacman": "gqrx", "zypper": "gqrx", "apk": "",
+                            "brew": ""},
     }
     m = table.get(logical, {})
     return m.get(PM, m.get("*", ""))
@@ -984,6 +989,58 @@ def install_rtlsdr(overwrite=False):
             f"{s}tee /etc/modprobe.d/blacklist-dvb_usb_rtl28xxu.conf >/dev/null", check=False)
 
 
+def install_gqrx(overwrite=False):
+    if OS == "macos":
+        pm_install_cask("gqrx", reinstall=overwrite)
+        return
+    name = pkg_name("gqrx")
+    if name:
+        pm_install(name, reinstall=overwrite)
+    elif shutil.which("flatpak"):
+        run("flatpak install -y flathub dl.gqrx.gqrx", check=False)
+    else:
+        raise RuntimeError("no gqrx package for this distro; install flatpak then "
+                           "'flatpak install flathub dl.gqrx.gqrx'")
+
+
+def _github_tag_asset(repo, tag, predicate):
+    """Return the first asset URL from a specific release tag matching predicate."""
+    url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+    req = urllib.request.Request(url, headers={"User-Agent": "bootstrap"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.load(r)
+    for asset in data.get("assets", []):
+        if predicate(asset["name"]):
+            return asset["browser_download_url"]
+    return None
+
+
+def install_sdrpp(overwrite=False):
+    if OS != "linux" or PM != "apt":
+        raise RuntimeError("SDR++ auto-install supports Debian/Ubuntu (apt) only; "
+                           "grab a build from github.com/AlexandreRouma/SDRPlusPlus/releases")
+    arch = ("arm64" if ARCH in ("aarch64", "arm64") else "amd64")
+    osr = subprocess.run(
+        ["bash", "-c", '. /etc/os-release 2>/dev/null; echo "$ID:$VERSION_CODENAME"'],
+        capture_output=True, text=True).stdout.strip()
+    did, _, codename = osr.partition(":")
+    repo = "AlexandreRouma/SDRPlusPlus"
+    url = None
+    if did and codename:
+        exact = f"sdrpp_{did}_{codename}_{arch}.deb"
+        url = _github_tag_asset(repo, "nightly", lambda n: n == exact)
+    if not url:  # fall back to any debian/ubuntu build for this arch
+        url = _github_tag_asset(
+            repo, "nightly",
+            lambda n: n.endswith(f"_{arch}.deb") and ("debian" in n or "ubuntu" in n))
+    if not url:
+        raise RuntimeError("no matching SDR++ .deb in the nightly release for this system")
+    s = sudo_prefix()
+    run(f"curl -fL '{url}' -o /tmp/sdrpp.deb")
+    run(f"{s}apt-get install -y /tmp/sdrpp.deb", check=False)
+    run(f"{s}dpkg -i /tmp/sdrpp.deb || {s}apt-get -f install -y", check=False)
+
+
 # ----- detection: is it already installed / configured? --------------------
 
 def _which(name):
@@ -1045,6 +1102,8 @@ DETECTORS = {
                              if subprocess.run(["bash", "-c",
                                 "ls /usr/local/lib/librtlsdr* >/dev/null 2>&1"]).returncode == 0
                              else None),
+    "gqrx":          lambda: _which("gqrx"),
+    "sdrpp":         lambda: _which("sdrpp"),
     "openssh-server": _sshd_present,
     "podman":        lambda: _which("podman"),
     "docker":        lambda: _which("docker"),
@@ -1084,6 +1143,8 @@ INSTALLERS = {
     "claude-code": install_claude_code,
     "vscode": install_vscode,
     "rtlsdr": install_rtlsdr,
+    "gqrx": install_gqrx,
+    "sdrpp": install_sdrpp,
     "openssh-server": install_openssh,
     "podman": install_podman,
     "docker": install_docker,
@@ -1095,7 +1156,7 @@ ORDER = ["git", "zsh", "oh-my-zsh", "powerlevel10k", "meslo-font",
          "tmux", "tpm", "tmux-config", "eza", "zoxide",
          "htop", "btop",
          "rust", "go", "nodejs", "vlang", "odin", "uv",
-         "claude-code", "vscode", "rtlsdr",
+         "claude-code", "vscode", "rtlsdr", "gqrx", "sdrpp",
          "openssh-server", "podman", "docker", "rustdesk"]
 
 
@@ -1237,6 +1298,24 @@ def uninstall_rtlsdr():
     run(f"rm -rf '{src}'", as_user=True, check=False)
 
 
+def uninstall_gqrx():
+    if OS == "macos":
+        pm_uninstall_cask("gqrx")
+        return
+    name = pkg_name("gqrx")
+    if name:
+        pm_remove(name)
+    elif shutil.which("flatpak"):
+        run("flatpak uninstall -y dl.gqrx.gqrx", check=False)
+
+
+def uninstall_sdrpp():
+    if OS == "linux" and PM == "apt":
+        run(f"{sudo_prefix()}apt-get remove -y sdrpp", check=False)
+    else:
+        run(f"{sudo_prefix()}rm -f /usr/bin/sdrpp /usr/local/bin/sdrpp", check=False)
+
+
 def uninstall_openssh():
     if OS == "macos":
         run(f"{sudo_prefix()}systemsetup -setremotelogin off", check=False)
@@ -1293,6 +1372,8 @@ UNINSTALLERS = {
     "claude-code": uninstall_claude_code,
     "vscode": uninstall_vscode,
     "rtlsdr": uninstall_rtlsdr,
+    "gqrx": uninstall_gqrx,
+    "sdrpp": uninstall_sdrpp,
     "openssh-server": uninstall_openssh,
     "podman": uninstall_podman,
     "docker": uninstall_docker,

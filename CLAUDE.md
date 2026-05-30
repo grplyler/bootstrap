@@ -38,7 +38,7 @@ The script must work under `curl | bash`, where stdin is the pipe, not the keybo
 
 ### The wizard's data-driven core
 
-Everything installable is declared in `CATEGORIES` (Terminal / System Tools / Programming Languages / Dev Tools / Services). Each entry is `(key, label, desc, deps)`. From this, these parallel structures must stay in sync for any item you add or remove:
+Everything installable is declared in `CATEGORIES` (Terminal / System Tools / Programming Languages / Dev Tools / SDR Tools / Services). Each entry is `(key, label, desc, deps)`. From this, these parallel structures must stay in sync for any item you add or remove:
 
 - **`CATEGORIES`** — the catalog and menu source of truth. `MENU_KEYS` is derived from it.
 - **`INSTALLERS`** — `key -> install_<x>(overwrite=False)` function.
