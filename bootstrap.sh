@@ -234,6 +234,7 @@ CATEGORIES = [
     ("Dev Tools", [
         ("claude-code",  "Claude Code",         "Anthropic CLI agent",      []),
         ("vscode",       "VS Code",             "editor",                   []),
+        ("ghcli",        "GitHub CLI",          "gh command-line tool",     []),
     ]),
     ("SDR Tools", [
         ("rtlsdr",       "rtl-sdr",             "RTL-SDR userland (source)", []),
@@ -539,6 +540,9 @@ def pkg_name(logical):
         "gqrx":           {"apt": "gqrx-sdr", "dnf": "gqrx", "yum": "gqrx",
                             "pacman": "gqrx", "zypper": "gqrx", "apk": "",
                             "brew": ""},
+        "gh":             {"apt": "gh", "dnf": "gh", "yum": "gh",
+                            "pacman": "github-cli", "zypper": "gh",
+                            "apk": "github-cli", "brew": "gh"},
     }
     m = table.get(logical, {})
     return m.get(PM, m.get("*", ""))
@@ -1036,6 +1040,31 @@ def install_vscode(overwrite=False):
                            "(install flatpak/snap or use the repo at code.visualstudio.com)")
 
 
+def install_ghcli(overwrite=False):
+    if OS == "macos":
+        pm_install("gh", reinstall=overwrite)
+        return
+    if PM == "apt":
+        # gh isn't in Debian/Ubuntu default repos; add GitHub's official apt repo.
+        s = sudo_prefix()
+        key = "/etc/apt/keyrings/githubcli-archive-keyring.gpg"
+        run(f"{s}mkdir -p /etc/apt/keyrings", check=False)
+        run(f"curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | "
+            f"{s}dd of='{key}'", check=False)
+        run(f"{s}chmod go+r '{key}'", check=False)
+        run(f'echo "deb [arch=$(dpkg --print-architecture) signed-by={key}] '
+            f'https://cli.github.com/packages stable main" | '
+            f"{s}tee /etc/apt/sources.list.d/github-cli.list >/dev/null", check=False)
+        run(f"{s}apt-get update", check=False)
+        pm_install("gh", reinstall=overwrite)
+        return
+    name = pkg_name("gh")
+    if name:
+        pm_install(name, reinstall=overwrite)
+    else:
+        raise RuntimeError("no gh package for this distro; see cli.github.com")
+
+
 # ----- libraries & packages ------------------------------------------------
 
 def install_rtlsdr(overwrite=False):
@@ -1194,6 +1223,7 @@ DETECTORS = {
     "claude-code":   lambda: _which("claude") or (os.path.join(TARGET_HOME, ".local/bin/claude")
                          if os.path.exists(os.path.join(TARGET_HOME, ".local/bin/claude")) else None),
     "vscode":        lambda: _which("code"),
+    "ghcli":         lambda: _which("gh"),
     "rtlsdr":        lambda: _which("rtl_sdr") or _which("rtl_test")
                          or ("/usr/local/lib"
                              if subprocess.run(["bash", "-c",
@@ -1243,6 +1273,7 @@ INSTALLERS = {
     "uv": install_uv,
     "claude-code": install_claude_code,
     "vscode": install_vscode,
+    "ghcli": install_ghcli,
     "rtlsdr": install_rtlsdr,
     "gqrx": install_gqrx,
     "sdrpp": install_sdrpp,
@@ -1260,7 +1291,7 @@ ORDER = ["git", "zsh", "oh-my-zsh", "powerlevel10k", "meslo-font",
          "tmux", "tpm", "tmux-config", "eza", "zoxide",
          "htop", "btop",
          "rust", "go", "nodejs", "vlang", "odin", "uv",
-         "claude-code", "vscode", "rtlsdr", "gqrx", "sdrpp",
+         "claude-code", "vscode", "ghcli", "rtlsdr", "gqrx", "sdrpp",
          "openssh-server", "podman", "docker", "rustdesk", "tailscale",
          "disable-wayland", "rustdesk-config"]
 
@@ -1389,6 +1420,16 @@ def uninstall_vscode():
         run(f"{sudo_prefix()}snap remove code", check=False)
 
 
+def uninstall_ghcli():
+    if OS == "macos":
+        pm_remove("gh")
+        return
+    pm_remove(pkg_name("gh") or "gh")
+    if PM == "apt":
+        run(f"{sudo_prefix()}rm -f /etc/apt/sources.list.d/github-cli.list "
+            "/etc/apt/keyrings/githubcli-archive-keyring.gpg", check=False)
+
+
 def uninstall_rtlsdr():
     s = sudo_prefix()
     src = os.path.join(TARGET_HOME, ".local/src/rtl-sdr")
@@ -1510,6 +1551,7 @@ UNINSTALLERS = {
     "uv": uninstall_uv,
     "claude-code": uninstall_claude_code,
     "vscode": uninstall_vscode,
+    "ghcli": uninstall_ghcli,
     "rtlsdr": uninstall_rtlsdr,
     "gqrx": uninstall_gqrx,
     "sdrpp": uninstall_sdrpp,
