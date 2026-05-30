@@ -235,6 +235,9 @@ CATEGORIES = [
         ("claude-code",  "Claude Code",         "Anthropic CLI agent",      []),
         ("vscode",       "VS Code",             "editor",                   []),
     ]),
+    ("Libraries & Packages", [
+        ("rtlsdr",       "rtl-sdr",             "RTL-SDR userland (source)", []),
+    ]),
     ("Services", [
         ("openssh-server","openssh-server",     "SSH daemon (enabled)",     []),
         ("podman",       "podman",              "daemonless containers",    []),
@@ -534,6 +537,13 @@ def pkg_name(logical):
         "docker":         {"apt": "docker.io", "dnf": "docker", "yum": "docker",
                             "pacman": "docker", "zypper": "docker", "apk": "docker",
                             "brew": ""},
+        "cmake":          {"*": "cmake"},
+        "pkgconfig":      {"apt": "pkg-config", "brew": "pkg-config", "apk": "pkgconf",
+                            "*": "pkgconf"},
+        "libusb-dev":     {"apt": "libusb-1.0-0-dev", "dnf": "libusb1-devel",
+                            "yum": "libusb1-devel", "pacman": "libusb",
+                            "zypper": "libusb-1_0-devel", "apk": "libusb-dev",
+                            "brew": "libusb"},
     }
     m = table.get(logical, {})
     return m.get(PM, m.get("*", ""))
@@ -934,6 +944,46 @@ def install_vscode(overwrite=False):
                            "(install flatpak/snap or use the repo at code.visualstudio.com)")
 
 
+# ----- libraries & packages ------------------------------------------------
+
+def install_rtlsdr(overwrite=False):
+    s = sudo_prefix()
+    # Build deps.
+    if OS == "macos":
+        pm_install("libusb", "cmake", "pkg-config")
+    else:
+        pm_install(pkg_name("cmake"), pkg_name("libusb-dev"), pkg_name("pkgconfig"))
+        if not (shutil.which("cc") or shutil.which("gcc")):
+            pm_install("gcc", "make")
+    # Clear out any distro-packaged librtlsdr so the source build wins.
+    if PM == "apt":
+        run(f"{s}apt-get purge -y '^librtlsdr' || true", check=False)
+    run(f"{s}rm -rf /usr/lib/librtlsdr* /usr/include/rtl-sdr* "
+        "/usr/local/lib/librtlsdr* /usr/local/include/rtl-sdr* "
+        "/usr/local/include/rtl_* /usr/local/bin/rtl_*", check=False)
+    # Build from osmocom source.
+    src = os.path.join(TARGET_HOME, ".local/src/rtl-sdr")
+    if os.path.isdir(src) and overwrite:
+        run(f"rm -rf '{src}'", as_user=True)
+    if os.path.isdir(src):
+        run(f"git -C '{src}' pull --ff-only || true", as_user=True, check=False)
+    else:
+        run(f"mkdir -p '{os.path.dirname(src)}'", as_user=True)
+        run(f"git clone https://github.com/osmocom/rtl-sdr '{src}'", as_user=True)
+    udev = "-DINSTALL_UDEV_RULES=ON" if OS == "linux" else ""
+    run(f"rm -rf '{src}/build' && mkdir -p '{src}/build'", as_user=True)
+    run(f"cmake -S '{src}' -B '{src}/build' {udev}", as_user=True)
+    run(f"cmake --build '{src}/build' -j", as_user=True)
+    run(f"{s}cmake --install '{src}/build'", check=False)
+    if OS == "linux":
+        run(f"[ -f '{src}/rtl-sdr.rules' ] && {s}cp '{src}/rtl-sdr.rules' "
+            "/etc/udev/rules.d/ || true", check=False)
+        run(f"{s}ldconfig", check=False)
+        # Blacklist the DVB kernel module so the dongle is usable as an SDR.
+        run("echo 'blacklist dvb_usb_rtl28xxu' | "
+            f"{s}tee /etc/modprobe.d/blacklist-dvb_usb_rtl28xxu.conf >/dev/null", check=False)
+
+
 # ----- detection: is it already installed / configured? --------------------
 
 def _which(name):
@@ -990,6 +1040,11 @@ DETECTORS = {
     "claude-code":   lambda: _which("claude") or (os.path.join(TARGET_HOME, ".local/bin/claude")
                          if os.path.exists(os.path.join(TARGET_HOME, ".local/bin/claude")) else None),
     "vscode":        lambda: _which("code"),
+    "rtlsdr":        lambda: _which("rtl_sdr") or _which("rtl_test")
+                         or ("/usr/local/lib"
+                             if subprocess.run(["bash", "-c",
+                                "ls /usr/local/lib/librtlsdr* >/dev/null 2>&1"]).returncode == 0
+                             else None),
     "openssh-server": _sshd_present,
     "podman":        lambda: _which("podman"),
     "docker":        lambda: _which("docker"),
@@ -1028,6 +1083,7 @@ INSTALLERS = {
     "uv": install_uv,
     "claude-code": install_claude_code,
     "vscode": install_vscode,
+    "rtlsdr": install_rtlsdr,
     "openssh-server": install_openssh,
     "podman": install_podman,
     "docker": install_docker,
@@ -1039,7 +1095,7 @@ ORDER = ["git", "zsh", "oh-my-zsh", "powerlevel10k", "meslo-font",
          "tmux", "tpm", "tmux-config", "eza", "zoxide",
          "htop", "btop",
          "rust", "go", "nodejs", "vlang", "odin", "uv",
-         "claude-code", "vscode",
+         "claude-code", "vscode", "rtlsdr",
          "openssh-server", "podman", "docker", "rustdesk"]
 
 
@@ -1167,6 +1223,20 @@ def uninstall_vscode():
         run(f"{sudo_prefix()}snap remove code", check=False)
 
 
+def uninstall_rtlsdr():
+    s = sudo_prefix()
+    src = os.path.join(TARGET_HOME, ".local/src/rtl-sdr")
+    run(f"{s}rm -rf /usr/lib/librtlsdr* /usr/include/rtl-sdr* "
+        "/usr/local/lib/librtlsdr* /usr/local/include/rtl-sdr* "
+        "/usr/local/include/rtl_* /usr/local/bin/rtl_* "
+        "/usr/local/lib/pkgconfig/librtlsdr.pc", check=False)
+    if OS == "linux":
+        run(f"{s}rm -f /etc/udev/rules.d/rtl-sdr.rules "
+            "/etc/modprobe.d/blacklist-dvb_usb_rtl28xxu.conf", check=False)
+        run(f"{s}ldconfig", check=False)
+    run(f"rm -rf '{src}'", as_user=True, check=False)
+
+
 def uninstall_openssh():
     if OS == "macos":
         run(f"{sudo_prefix()}systemsetup -setremotelogin off", check=False)
@@ -1222,6 +1292,7 @@ UNINSTALLERS = {
     "uv": uninstall_uv,
     "claude-code": uninstall_claude_code,
     "vscode": uninstall_vscode,
+    "rtlsdr": uninstall_rtlsdr,
     "openssh-server": uninstall_openssh,
     "podman": uninstall_podman,
     "docker": uninstall_docker,
@@ -1292,6 +1363,9 @@ def do_apply(installed, keep):
         tips.append("In tmux press prefix + I to install plugins via tpm.")
     if final & {"rust", "go", "nodejs", "vlang", "odin", "uv"}:
         tips.append("Open a new shell so the language toolchains land on your PATH.")
+    if "rtlsdr" in final:
+        tips.append("Replug your RTL-SDR dongle (or reboot) so the udev rules + "
+                    "DVB blacklist take effect; test with 'rtl_test'.")
     if to_remove:
         tips.append("Open a new shell to drop any removed tools from your environment.")
     if tips:
