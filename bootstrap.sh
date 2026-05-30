@@ -317,7 +317,7 @@ def render_main(idx, selected):
     return Panel(
         body,
         title="[bold cyan]bootstrap[/]",
-        subtitle="[dim]↑/↓ move · enter select · q quit[/]",
+        subtitle="[dim]checked = keep/install · unchecked = remove · ↑/↓ move · enter · q quit[/]",
         border_style="cyan",
         padding=(1, 3),
     )
@@ -327,10 +327,11 @@ def main_entries(selected):
     entries = []
     for cat, items in CATEGORIES:
         n = sum(1 for k, *_ in items if k in selected)
-        tag = f"[{n} selected]" if n else "[ ]"
-        entries.append((f"{cat}  {tag}", "choose what to install"))
-    entries.append(("Review & Install", "run the installer"))
-    entries.append(("Quit", "exit without installing"))
+        total = len(items)
+        tag = f"[{n}/{total} on]"
+        entries.append((f"{cat}  {tag}", "checked = keep/install · unchecked = remove"))
+    entries.append(("Review & Apply", "install missing, uninstall unchecked"))
+    entries.append(("Quit", "exit without changes"))
     return entries
 
 
@@ -379,7 +380,7 @@ def render_checklist(cat, items, idx, selected):
     return Panel(
         Group(*rows),
         title=f"[bold cyan]{cat}[/]",
-        subtitle="[dim]space toggle · a all · n none · enter back · esc back[/]",
+        subtitle="[dim]space toggle (on=keep/install, off=remove) · a all · n none · enter back[/]",
         border_style="cyan",
         padding=(1, 2),
     )
@@ -424,30 +425,6 @@ def expand_deps(selected):
                     out.add(dep)
                     changed = True
     return out
-
-
-def confirm_screen(selected):
-    table = Table(show_header=True, header_style="bold cyan", border_style="cyan")
-    table.add_column("Category")
-    table.add_column("Item")
-    table.add_column("Notes", style="dim")
-    shown = set()
-    for cat, items in CATEGORIES:
-        for key, label, desc, deps in items:
-            if key in selected:
-                table.add_row(cat, label, desc)
-                shown.add(key)
-    for key in sorted(selected - shown):
-        if key in ITEM:
-            table.add_row("(dependency)", ITEM[key][0], ITEM[key][1])
-    console.print(Panel(table, title="[bold]About to install[/]",
-                        border_style="green", padding=(1, 2)))
-    if not has_tty():
-        return True
-    console.print("[bold]Proceed? [Y/n][/] ", end="")
-    ans = get_key()
-    console.print(ans)
-    return ans in ("enter", "y", "Y")
 
 
 # ----- shell command helpers -----------------------------------------------
@@ -505,6 +482,39 @@ def pm_install_cask(*pkgs, reinstall=False):
     if pkgs:
         verb = "reinstall" if reinstall else "install"
         run(f"brew {verb} --cask {' '.join(pkgs)}")
+
+
+def pm_remove(*pkgs):
+    pkgs = [p for p in pkgs if p]
+    if not pkgs:
+        return
+    s = sudo_prefix()
+    joined = " ".join(pkgs)
+    cmds = {
+        "brew":   f"brew uninstall {joined}",
+        "apt":    f"DEBIAN_FRONTEND=noninteractive {s}apt-get remove -y {joined}",
+        "dnf":    f"{s}dnf remove -y {joined}",
+        "yum":    f"{s}yum remove -y {joined}",
+        "pacman": f"{s}pacman -Rns --noconfirm {joined}",
+        "zypper": f"{s}zypper --non-interactive remove {joined}",
+        "apk":    f"{s}apk del {joined}",
+    }
+    run(cmds[PM], check=False)
+
+
+def pm_uninstall_cask(*pkgs):
+    if PM != "brew":
+        return
+    pkgs = [p for p in pkgs if p]
+    if pkgs:
+        run(f"brew uninstall --cask {' '.join(pkgs)}", check=False)
+
+
+def strip_zshrc(*needles):
+    """Remove every .zshrc line containing any of the given fixed strings."""
+    for n in needles:
+        run(f"[ -f '{ZSHRC}' ] && grep -vF {sh_quote(n)} '{ZSHRC}' > '{ZSHRC}.tmp' "
+            f"&& mv '{ZSHRC}.tmp' '{ZSHRC}' || true", as_user=True, check=False)
 
 
 def pkg_name(logical):
@@ -997,23 +1007,6 @@ def detect(key):
         return None
 
 
-def prompt_action(label, detail):
-    """Already present -> ask skip/overwrite. Returns 'skip' or 'overwrite'."""
-    console.print(f"[yellow]• {label} already present[/] [dim]({detail})[/] "
-                  "— [bold]s[/]kip / [bold]o[/]verwrite? [s] ", end="")
-    if not has_tty():
-        console.print("skip")
-        return "skip"
-    while True:
-        k = get_key()
-        if k in ("o", "O"):
-            console.print("overwrite")
-            return "overwrite"
-        if k in ("s", "S", "enter", "esc", "q"):
-            console.print("skip")
-            return "skip"
-
-
 INSTALLERS = {
     "git": install_git,
     "zsh": install_zsh,
@@ -1050,33 +1043,235 @@ ORDER = ["git", "zsh", "oh-my-zsh", "powerlevel10k", "meslo-font",
          "openssh-server", "podman", "docker", "rustdesk"]
 
 
-def do_install(selected):
-    selected = expand_deps(selected)
+# ----- uninstallers --------------------------------------------------------
+
+def uninstall_zsh():
+    bash_bin = shutil.which("bash") or "/bin/bash"
+    run(f"{sudo_prefix()}chsh -s '{bash_bin}' '{TARGET_USER}'", check=False)
+    strip_zshrc("export TERM=xterm-256color")
+    pm_remove(pkg_name("zsh"))
+
+
+def uninstall_omz():
+    run(f"rm -rf '{os.path.join(TARGET_HOME, '.oh-my-zsh')}'", as_user=True, check=False)
+    strip_zshrc('export ZSH="$HOME/.oh-my-zsh"', "oh-my-zsh.sh", "ZSH_THEME=")
+
+
+def uninstall_p10k():
+    p10k = os.path.join(TARGET_HOME, ".oh-my-zsh/custom/themes/powerlevel10k")
+    run(f"rm -rf '{p10k}'", as_user=True, check=False)
+    run(f"rm -f '{os.path.join(TARGET_HOME, '.p10k.zsh')}'", as_user=True, check=False)
+    # If oh-my-zsh stays, point the theme back at the default.
+    sed_i = "sed -i ''" if OS == "macos" else "sed -i"
+    run(f"[ -f '{ZSHRC}' ] && {sed_i} 's|^ZSH_THEME=.*|ZSH_THEME=\"robbyrussell\"|' '{ZSHRC}' "
+        "|| true", as_user=True, check=False)
+
+
+def uninstall_meslo():
+    fd = _font_dir()
+    for f in MESLO_FILES:
+        run(f"rm -f '{fd}/{f.replace('%20', ' ')}'", as_user=True, check=False)
+    if OS == "linux":
+        run(f"fc-cache -f '{fd}' >/dev/null 2>&1 || true", as_user=True, check=False)
+
+
+def uninstall_tmux():
+    pm_remove(pkg_name("tmux"))
+
+
+def uninstall_tpm():
+    run(f"rm -rf '{os.path.join(TARGET_HOME, '.tmux/plugins/tpm')}'", as_user=True, check=False)
+
+
+def uninstall_eza():
+    pm_remove(pkg_name("eza"))
+    strip_zshrc("alias ls='eza", "alias ll='eza", "alias la='eza")
+
+
+def uninstall_zoxide():
+    pm_remove(pkg_name("zoxide"))
+    strip_zshrc("zoxide init zsh")
+
+
+def uninstall_tmux_config():
+    conf = os.path.join(TARGET_HOME, ".tmux.conf")
+    run(f"if [ -f '{conf}.bak' ]; then mv '{conf}.bak' '{conf}'; else rm -f '{conf}'; fi",
+        as_user=True, check=False)
+    run(f"rm -rf '{os.path.join(TARGET_HOME, '.config/tmux/plugins')}'", as_user=True, check=False)
+
+
+def uninstall_htop():
+    pm_remove(pkg_name("htop"))
+
+
+def uninstall_btop():
+    pm_remove(pkg_name("btop"))
+
+
+def uninstall_rust():
+    run('export PATH="$HOME/.cargo/bin:$PATH"; '
+        'command -v rustup >/dev/null 2>&1 && rustup self uninstall -y '
+        '|| rm -rf "$HOME/.cargo" "$HOME/.rustup"', as_user=True, check=False)
+    strip_zshrc("cargo/env")
+
+
+def uninstall_go():
+    if OS == "macos":
+        pm_remove("go")
+        return
+    run(f"{sudo_prefix()}rm -rf /usr/local/go", check=False)
+    strip_zshrc("/usr/local/go/bin")
+
+
+def uninstall_nodejs():
+    run(f"rm -rf '{os.path.join(TARGET_HOME, '.nvm')}'", as_user=True, check=False)
+    strip_zshrc("NVM_DIR", "nvm.sh", "nvm bash_completion")
+
+
+def uninstall_vlang():
+    run(f"rm -rf '{os.path.join(TARGET_HOME, '.vlang')}'", as_user=True, check=False)
+    run(f"{sudo_prefix()}rm -f /usr/local/bin/v", check=False)
+    strip_zshrc(".vlang")
+
+
+def uninstall_odin():
+    if OS == "macos":
+        pm_remove("odin")
+        return
+    run(f"rm -rf '{os.path.join(TARGET_HOME, '.local/odin')}'", as_user=True, check=False)
+    strip_zshrc(".local/odin")
+
+
+def uninstall_uv():
+    run('command -v uv >/dev/null 2>&1 && uv self uninstall 2>/dev/null; '
+        'rm -f "$HOME/.local/bin/uv" "$HOME/.local/bin/uvx"; '
+        'rm -rf "$HOME/.local/share/uv"', as_user=True, check=False)
+
+
+def uninstall_claude_code():
+    run('command -v claude >/dev/null 2>&1 && claude uninstall 2>/dev/null; '
+        'rm -f "$HOME/.local/bin/claude"', as_user=True, check=False)
+
+
+def uninstall_vscode():
+    if OS == "macos":
+        pm_uninstall_cask("visual-studio-code")
+        return
+    if PM == "apt":
+        run(f"{sudo_prefix()}apt-get remove -y code", check=False)
+    elif PM in ("dnf", "yum", "zypper"):
+        pm_remove("code")
+    elif shutil.which("flatpak"):
+        run("flatpak uninstall -y com.visualstudio.code", check=False)
+    elif shutil.which("snap"):
+        run(f"{sudo_prefix()}snap remove code", check=False)
+
+
+def uninstall_openssh():
+    if OS == "macos":
+        run(f"{sudo_prefix()}systemsetup -setremotelogin off", check=False)
+        return
+    if shutil.which("systemctl"):
+        svc = "sshd" if PM in ("dnf", "yum", "pacman", "zypper", "apk") else "ssh"
+        run(f"{sudo_prefix()}systemctl disable --now {svc}", check=False)
+    pm_remove(pkg_name("openssh-server"))
+
+
+def uninstall_podman():
+    pm_remove(pkg_name("podman"))
+
+
+def uninstall_docker():
+    if OS == "macos":
+        pm_uninstall_cask("docker")
+        return
+    if shutil.which("systemctl"):
+        run(f"{sudo_prefix()}systemctl disable --now docker", check=False)
+    pm_remove(pkg_name("docker"))
+
+
+def uninstall_rustdesk():
+    if OS == "macos":
+        pm_uninstall_cask("rustdesk")
+        return
+    if PM in ("apt", "dnf", "yum", "zypper"):
+        pm_remove("rustdesk")
+    elif shutil.which("flatpak"):
+        run("flatpak uninstall -y com.rustdesk.RustDesk", check=False)
+    else:
+        run(f"{sudo_prefix()}rm -f /usr/bin/rustdesk", check=False)
+
+
+UNINSTALLERS = {
+    "zsh": uninstall_zsh,
+    "oh-my-zsh": uninstall_omz,
+    "powerlevel10k": uninstall_p10k,
+    "meslo-font": uninstall_meslo,
+    "tmux": uninstall_tmux,
+    "tpm": uninstall_tpm,
+    "eza": uninstall_eza,
+    "zoxide": uninstall_zoxide,
+    "tmux-config": uninstall_tmux_config,
+    "htop": uninstall_htop,
+    "btop": uninstall_btop,
+    "rust": uninstall_rust,
+    "go": uninstall_go,
+    "nodejs": uninstall_nodejs,
+    "vlang": uninstall_vlang,
+    "odin": uninstall_odin,
+    "uv": uninstall_uv,
+    "claude-code": uninstall_claude_code,
+    "vscode": uninstall_vscode,
+    "openssh-server": uninstall_openssh,
+    "podman": uninstall_podman,
+    "docker": uninstall_docker,
+    "rustdesk": uninstall_rustdesk,
+}
+
+# Menu-visible keys (everything except implicit deps like `git`).
+MENU_KEYS = {k for _, items in CATEGORIES for k, *_ in items}
+
+
+def plan(installed, keep):
+    """Desired-state diff. Returns (to_install, to_remove) as ORDER-sorted lists."""
+    desired = expand_deps(keep)
+    to_install = [k for k in ORDER if k in desired and k not in installed]
+    to_remove = [k for k in reversed(ORDER)
+                 if k in installed and k in MENU_KEYS and k not in desired]
+    return to_install, to_remove
+
+
+def do_apply(installed, keep):
+    to_install, to_remove = plan(installed, keep)
     results = []
-    for key in ORDER:
-        if key not in selected:
-            continue
+
+    for key in to_install:
         label = ITEM.get(key, (key,))[0]
-        console.rule(f"[bold cyan]{label}[/]")
-
-        # Already installed / configured? Let the user skip or overwrite.
-        overwrite = False
-        detail = detect(key)
-        if detail:
-            if prompt_action(label, detail) == "skip":
-                results.append((label, "skip", "already present"))
-                continue
-            overwrite = True
-
+        console.rule(f"[bold green]install {label}[/]")
         try:
-            INSTALLERS[key](overwrite=overwrite)
-            results.append((label, "ok", "reinstalled" if overwrite else ""))
+            INSTALLERS[key]()
+            results.append((label, "installed", ""))
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]!! {label} failed: {e}[/]")
             results.append((label, "fail", str(e)))
 
+    for key in to_remove:
+        label = ITEM.get(key, (key,))[0]
+        console.rule(f"[bold red]remove {label}[/]")
+        fn = UNINSTALLERS.get(key)
+        if not fn:
+            results.append((label, "skip", "no uninstaller"))
+            continue
+        try:
+            fn()
+            results.append((label, "removed", ""))
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[red]!! {label} remove failed: {e}[/]")
+            results.append((label, "fail", str(e)))
+
     # summary
-    badge = {"ok": "[green]ok[/]", "skip": "[yellow]skipped[/]", "fail": "[red]failed[/]"}
+    badge = {"installed": "[green]installed[/]", "removed": "[red]removed[/]",
+             "skip": "[yellow]skipped[/]", "fail": "[bold red]failed[/]"}
     table = Table(show_header=True, header_style="bold", border_style="cyan")
     table.add_column("Item")
     table.add_column("Result")
@@ -1085,36 +1280,67 @@ def do_install(selected):
         table.add_row(label, badge.get(state, state), msg)
     console.print(Panel(table, title="[bold]Summary[/]", border_style="green", padding=(1, 2)))
 
+    final = expand_deps(keep)
     tips = []
-    if "zsh" in selected:
+    if "zsh" in final:
         tips.append("Log out + back in (or run 'zsh') to start using zsh.")
-    if "powerlevel10k" in selected:
+    if "powerlevel10k" in final:
         tips.append("Run 'p10k configure' to finish the prompt wizard.")
-    if "meslo-font" in selected:
+    if "meslo-font" in final:
         tips.append("Set your terminal font to 'MesloLGS NF'.")
-    if "tmux-config" in selected:
+    if "tmux-config" in final:
         tips.append("In tmux press prefix + I to install plugins via tpm.")
-    if selected & {"rust", "go", "nodejs", "vlang", "odin", "uv"}:
+    if final & {"rust", "go", "nodejs", "vlang", "odin", "uv"}:
         tips.append("Open a new shell so the language toolchains land on your PATH.")
+    if to_remove:
+        tips.append("Open a new shell to drop any removed tools from your environment.")
     if tips:
         console.print(Panel("\n".join(f"• {t}" for t in tips),
                             title="[bold]Next steps[/]", border_style="yellow", padding=(1, 2)))
 
 
-# ----- main loop -----------------------------------------------------------
+# ----- confirm + main loop -------------------------------------------------
+
+def confirm_apply(to_install, to_remove):
+    groups = []
+    if to_install:
+        t = Table(show_header=False, box=None, padding=(0, 1))
+        for k in to_install:
+            t.add_row("[green]+[/]", ITEM[k][0], f"[dim]{ITEM[k][1]}[/]")
+        groups.append(Panel(t, title="[green]Install[/]", border_style="green"))
+    if to_remove:
+        t = Table(show_header=False, box=None, padding=(0, 1))
+        for k in to_remove:
+            t.add_row("[red]-[/]", ITEM[k][0], "[red]uninstall + remove config[/]")
+        groups.append(Panel(t, title="[red]Remove[/]", border_style="red"))
+    console.print(Group(*groups))
+    if to_remove:
+        console.print("[bold red]These items will be UNINSTALLED and their config removed.[/]")
+    if not has_tty():
+        return True
+    console.print("[bold]Apply these changes? [y/N][/] ", end="")
+    k = get_key()
+    console.print(k)
+    return k in ("y", "Y")
+
 
 def main():
-    selected = set()
-    # Preselect everything when there's no interactive TTY (e.g. plain pipe).
+    # Pre-check whatever is already installed; the checkbox state is the
+    # desired state. Checked = keep/install, unchecked = remove if present.
+    installed = {k for k in MENU_KEYS if detect(k)}
+
     if not has_tty():
-        console.print("[yellow]No interactive terminal; installing all items.[/]")
-        for _, items in CATEGORIES:
-            for key, *_ in items:
-                selected.add(key)
-        if confirm_screen(expand_deps(selected)):
-            do_install(selected)
+        # Non-interactive: install everything missing, remove nothing.
+        keep = set(MENU_KEYS)
+        to_install, _ = plan(installed, keep)
+        console.print("[yellow]No interactive terminal; installing all missing items.[/]")
+        if to_install and confirm_apply(to_install, []):
+            do_apply(installed, keep)
+        else:
+            console.print("[green]Nothing to install.[/]")
         return
 
+    selected = set(installed)
     while True:
         action = main_menu(selected)
         if action == "quit":
@@ -1125,15 +1351,18 @@ def main():
             items = next(its for c, its in CATEGORIES if c == cat)
             checklist(cat, items, selected)
             continue
-        if action == "install":
-            if not selected:
-                console.print("[yellow]Nothing selected.[/]")
-                continue
+        if action == "install":  # "Review & Apply"
             console.clear()
-            if confirm_screen(expand_deps(selected)):
-                do_install(selected)
+            to_install, to_remove = plan(installed, selected)
+            if not to_install and not to_remove:
+                console.print("[green]No changes — current selection matches what's installed.[/]")
+                console.print("[dim]press any key[/]")
+                get_key()
+                continue
+            if confirm_apply(to_install, to_remove):
+                do_apply(installed, selected)
                 return
-            # else loop back to menu
+            # declined -> back to menu
 
 
 if __name__ == "__main__":

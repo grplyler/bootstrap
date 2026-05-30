@@ -38,14 +38,15 @@ The script must work under `curl | bash`, where stdin is the pipe, not the keybo
 
 ### The wizard's data-driven core
 
-Everything installable is declared in `CATEGORIES` (Terminal / System Tools / Services). Each entry is `(key, label, desc, deps)`. From this, three parallel structures must stay in sync for any item you add or remove:
+Everything installable is declared in `CATEGORIES` (Terminal / System Tools / Programming Languages / Dev Tools / Services). Each entry is `(key, label, desc, deps)`. From this, these parallel structures must stay in sync for any item you add or remove:
 
-- **`CATEGORIES`** — the catalog and menu source of truth.
+- **`CATEGORIES`** — the catalog and menu source of truth. `MENU_KEYS` is derived from it.
 - **`INSTALLERS`** — `key -> install_<x>(overwrite=False)` function.
-- **`DETECTORS`** — `key -> () -> truthy-detail-or-None`, used to decide whether to prompt skip/overwrite.
-- **`ORDER`** — explicit install sequence (dependencies first). `git` is an implicit dep only and never appears in a menu.
+- **`UNINSTALLERS`** — `key -> uninstall_<x>()` function (reverses the installer: pm remove / `rm -rf` / strip `.zshrc` lines / restore backups).
+- **`DETECTORS`** — `key -> () -> truthy-detail-or-None`, used to seed which items start checked.
+- **`ORDER`** — explicit install sequence (dependencies first). `git` is an implicit dep only and never appears in a menu, so it is never uninstalled.
 
-Dependencies are resolved by `expand_deps()` (transitive closure over the `deps` lists). The install loop (`do_install`) walks `ORDER`, runs each `DETECTORS[key]`; if already present it calls `prompt_action()` to ask skip-vs-overwrite and passes `overwrite=` into the installer. Installers are expected to be idempotent and to honor `overwrite` (reinstall package / `rm -rf` and re-clone / re-fetch).
+**Desired-state model.** The wizard pre-checks every item that `detect()` finds installed; the checkbox state *is* the target state. `plan(installed, keep)` diffs them: `to_install = expand_deps(keep) - installed`, `to_remove = (installed ∩ MENU_KEYS) - expand_deps(keep)` (walked in reverse `ORDER` so dependents are removed before their deps). `do_apply()` installs the missing, then uninstalls the unchecked-but-present, after `confirm_apply()` (which requires an explicit `y` when anything will be removed). Dependencies are resolved by `expand_deps()` (transitive closure over `deps`), so a checked item's deps are never removed. Installers/uninstallers must be idempotent.
 
 ### Cross-distro package abstraction
 
